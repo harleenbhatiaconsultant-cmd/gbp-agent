@@ -33,6 +33,7 @@ const NAV_ITEMS = [
   { href: "approvals", label: "Approvals" },
   { href: "settings/connections", label: "Connections" },
   { href: "settings/members", label: "Members" },
+  { href: "settings/jobs", label: "Jobs" },
 ] as const;
 
 export function AppHeader({

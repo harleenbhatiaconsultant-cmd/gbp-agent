@@ -5,7 +5,9 @@ import { ChangeRequestStatus } from "@/generated/prisma/enums";
 import { resolveTenantContext } from "@/server/auth/session";
 import { listChangeRequests, approveChange, rejectChange, executeChange } from "@/server/services/changes";
 import { getWriteModeSummary } from "@/server/services/write-mode";
-import { can } from "@/server/auth/rbac";
+import { enqueueChangeExecution } from "@/server/jobs/handlers";
+import { isQueueingAvailable } from "@/server/jobs/redis";
+import { can, requireCapability } from "@/server/auth/rbac";
 import { isAppError } from "@/server/errors";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -89,6 +91,26 @@ async function executeAction(formData: FormData) {
   });
 }
 
+/**
+ * Hands the change to the worker instead of running it inline.
+ *
+ * Useful once the queue exists: execution is rate-limited per profile and can
+ * take a while, so it does not belong on a request thread.
+ */
+async function queueAction(formData: FormData) {
+  "use server";
+  const orgSlug = String(formData.get("orgSlug"));
+  const id = String(formData.get("changeRequestId"));
+  await withRedirect(orgSlug, async () => {
+    const ctx = await resolveTenantContext(orgSlug);
+    requireCapability(ctx, "change:execute");
+    const result = await enqueueChangeExecution(ctx.organizationId, id);
+    return result.enqueued
+      ? "Queued for background execution."
+      : `Not queued: ${result.reason ?? "unknown reason"}`;
+  });
+}
+
 export default async function ApprovalsPage({
   params,
   searchParams,
@@ -106,6 +128,7 @@ export default async function ApprovalsPage({
   const canApprove = can(ctx, "change:approve");
   const canExecute = can(ctx, "change:execute");
   const writeMode = getWriteModeSummary();
+  const queueingAvailable = isQueueingAvailable();
 
   const error = typeof query.error === "string" ? query.error : null;
   const done = typeof query.done === "string" ? query.done : null;
@@ -274,6 +297,16 @@ export default async function ApprovalsPage({
                       <input type="hidden" name="changeRequestId" value={request.id} />
                       <Button type="submit" size="sm" variant="outline">
                         {writeMode.willApply ? "Apply to Google" : "Validate against Google"}
+                      </Button>
+                    </form>
+                  ) : null}
+
+                  {canExecute && queueingAvailable ? (
+                    <form action={queueAction}>
+                      <input type="hidden" name="orgSlug" value={orgSlug} />
+                      <input type="hidden" name="changeRequestId" value={request.id} />
+                      <Button type="submit" size="sm" variant="ghost">
+                        Queue for worker
                       </Button>
                     </form>
                   ) : null}

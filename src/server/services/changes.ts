@@ -31,10 +31,11 @@ import {
 } from '@/generated/prisma/enums';
 import { prisma } from '@/server/db';
 import { requireCapability, requireHumanApprover } from '@/server/auth/rbac';
-import type { TenantContext } from '@/server/auth/tenant-context';
+import { isUserContext, type TenantContext } from '@/server/auth/tenant-context';
 import {
   BadRequestError,
   ConflictError,
+  ForbiddenError,
   NotFoundError,
   PolicyBlockedError,
   ValidationError,
@@ -396,8 +397,6 @@ export async function executeChange(
   ctx: TenantContext,
   changeRequestId: string,
 ): Promise<ExecuteChangeResult> {
-  requireCapability(ctx, 'change:execute');
-
   const request = await ctx.db.changeRequest.findFirst({
     where: { id: changeRequestId },
     include: {
@@ -411,6 +410,8 @@ export async function executeChange(
     },
   });
   if (!request) throw new NotFoundError('Change request not found.');
+
+  authorizeExecution(ctx, request);
 
   if (request.status === ChangeRequestStatus.EXECUTED) {
     // Idempotency: a retry of an already-applied change is a no-op, not a
@@ -446,6 +447,7 @@ export async function executeChange(
   );
   const providerCtx = {
     accessToken,
+    connectionId: request.location.gbpAccount.connectionId,
     logContext: { organizationId: ctx.organizationId, changeRequestId },
   };
 
@@ -658,6 +660,35 @@ export async function executeChange(
   }
 }
 
+/**
+ * Authorizes execution.
+ *
+ * A signed-in user needs the capability. A background worker has no role at
+ * all, and deliberately so — it carries no authority of its own. It may only
+ * carry out a change that a NAMED HUMAN already approved, which is checked
+ * here against the stored approver rather than assumed from the queue.
+ *
+ * The practical effect: enqueueing a job can never become a way to apply a
+ * change nobody approved.
+ */
+function authorizeExecution(
+  ctx: TenantContext,
+  request: { approvedByUserId: string | null; status: ChangeRequestStatus },
+): void {
+  if (isUserContext(ctx)) {
+    requireCapability(ctx, 'change:execute');
+    return;
+  }
+
+  if (!request.approvedByUserId) {
+    throw new ForbiddenError(
+      'A background job cannot execute a change that no person approved. ' +
+        'System contexts carry out approved work; they do not authorize it.',
+      { changeStatus: request.status },
+    );
+  }
+}
+
 function describeFailure(error: unknown): { code: string; message: string } {
   if (isGbpError(error)) {
     return { code: error.kind, message: error.message.slice(0, 1000) };
@@ -716,7 +747,11 @@ export async function verifyChange(
   );
 
   const observed = await provider.getLocation(
-    { accessToken, logContext: { organizationId: ctx.organizationId, changeRequestId } },
+    {
+      accessToken,
+      connectionId: request.location.gbpAccount.connectionId,
+      logContext: { organizationId: ctx.organizationId, changeRequestId },
+    },
     request.location.googleLocationName,
   );
 

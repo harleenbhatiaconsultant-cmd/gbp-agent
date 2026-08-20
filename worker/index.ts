@@ -2,15 +2,15 @@
  * Worker process entrypoint.
  *
  * Deployed as its own Railway service, separate from `web`. It owns every
- * outbound Google API call, audit run, AI call, crawl and change execution.
+ * outbound Google API call, audit run, and change execution.
  *
  * Why a separate process (ARCHITECTURE.md §1.1): GBP writes are rate-limited to
  * roughly 10 edits/minute per profile, are long-running, and must be retryable
  * with idempotency. Running them inside an HTTP request handler would couple
  * correctness to request timeouts.
  *
- * PHASE 0: this process boots, validates configuration, and verifies database
- * connectivity. Queue consumers arrive in Phase 4 once Redis is provisioned.
+ * Without REDIS_URL the process starts and idles rather than crashing, so the
+ * deployment topology can exist before the queue does.
  */
 
 import 'dotenv/config';
@@ -21,6 +21,11 @@ import { env } from '@/config/env.server';
 import { getWriteMode } from '@/config/features';
 import { prisma } from '@/server/db';
 import { logger } from '@/server/observability/logger';
+import { pingRedis, closeRedisConnection, isQueueingAvailable } from '@/server/jobs/redis';
+import { startWorkers, stopWorkers } from '@/server/jobs/workers';
+import { closeQueues } from '@/server/jobs/queues';
+
+let shuttingDown = false;
 
 async function main(): Promise<void> {
   logger.info(
@@ -35,24 +40,41 @@ async function main(): Promise<void> {
   await prisma.$queryRaw`SELECT 1`;
   logger.info('Database connection verified');
 
-  if (!env.REDIS_URL) {
+  if (!isQueueingAvailable()) {
     logger.warn(
-      'REDIS_URL is not set — no queues to consume. This is expected until Phase 4; ' +
-        'the worker will idle. Paste the Upstash connection string into .env to activate it.',
+      'REDIS_URL is not set — no queues to consume. The worker will idle. ' +
+        'Paste the Upstash connection string into .env to activate it.',
     );
+    logger.info('Worker ready (idle: queueing not configured)');
+    return;
   }
 
-  // Phase 4 registers BullMQ workers here.
+  const ping = await pingRedis();
+  if (!ping.ok) {
+    // Fail loudly: a worker that cannot reach Redis will never process anything,
+    // and looking healthy while doing nothing is the worst of both.
+    throw new Error(`Redis is configured but unreachable: ${ping.error}`);
+  }
+  logger.info({ latencyMs: ping.latencyMs }, 'Redis connection verified');
 
-  logger.info('Worker ready (idle: no queues registered yet)');
+  const started = startWorkers();
+  logger.info({ workers: started, writeMode: getWriteMode() }, 'Worker ready');
 }
 
 async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
   logger.info({ signal }, 'Worker shutting down');
+
   try {
-    // Phase 4: close queue consumers here before the database, so in-flight
-    // jobs finish rather than being killed mid-write.
+    // Order matters: let in-flight jobs finish before the database goes away,
+    // or a job mid-transaction is cut off partway through.
+    await stopWorkers();
+    await closeQueues();
+    await closeRedisConnection();
     await prisma.$disconnect();
+    logger.info('Worker shut down cleanly');
   } catch (error) {
     logger.error({ err: error }, 'Error during shutdown');
   } finally {

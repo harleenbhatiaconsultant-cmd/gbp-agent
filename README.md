@@ -150,7 +150,7 @@ a fix on every audit run and make the client-facing history worthless.
 | 2 | Google OAuth connection, encrypted tokens | done (needs credentials to test live) |
 | 3 | Location import, immutable snapshots | done (needs API access approval) |
 | 5 | Audit rule engine, health score, findings | done |
-| 4 | BullMQ jobs and scheduling | not started — needs Redis |
+| 4 | BullMQ jobs, scheduling, quota governor | done — inactive until REDIS_URL is set |
 | 6 | Executors, policy engine, approval queue | done — write path built and tested, gate closed |
 
 ## The change pipeline (Phase 6)
@@ -187,3 +187,46 @@ credentials loaded**. That is asserted against the provider's actual call log in
 the gate open in isolation to prove the write path behind it is correct — dry run first, ChangeLog
 and status in one transaction, no double-apply on retry, and verification that catches a value
 Google did not persist.
+
+## Background jobs (Phase 4)
+
+Three processes, one database, one Redis. `web` enqueues, `worker` consumes, `scheduler` only
+registers recurring work — **pin the scheduler to one replica** or every schedule fires twice.
+
+| Schedule | Cron (UTC) | Does |
+|---|---|---|
+| `maintenance.tokenRefreshSweep` | `15 * * * *` | Refreshes every connection, so revoked access is noticed within the hour instead of at 3am |
+| `maintenance.reapStaleJobs` | `45 * * * *` | Marks runs abandoned by a dead worker as failed |
+| `sync.fanout` | `0 2 * * *` | Enqueues one sync per active connection |
+| `audit.fanout` | `0 4 * * 1` | Enqueues one audit per location — after the nightly sync, not before |
+| `maintenance.snapshotPrune` | `30 3 * * 0` | Prunes superseded snapshots, keeping any an AuditRun references |
+
+Schedules enqueue a **fan-out** job rather than the work itself, so the set of schedules stays
+fixed regardless of customer count, and a scheduler restart is harmless. Every enqueued job has a
+deterministic id (`name:subject:bucket`), so a restart, an overlapping tick or a double-click
+cannot queue the same work twice.
+
+**Queueing is optional infrastructure.** Without `REDIS_URL` the app runs normally, enqueue is a
+logged no-op, and syncing and auditing still work on demand — the platform must be usable before
+the queue exists. But if `REDIS_URL` *is* set and unreachable, the worker and scheduler **exit**
+rather than hang: a process that looks alive while processing nothing is worse than one that
+restarts.
+
+### Authority
+
+A background job carries **no authority of its own**. System contexts may observe and diagnose —
+sync, audit, view — and may never approve, manage connections, or change membership. A job can
+carry out an approved change only by presenting the stored approver, so enqueueing can never
+become a route to applying something nobody approved.
+
+### Quota
+
+The governor sits inside the provider, so no caller can forget it. Writes consume both budgets:
+the global request rate and Google's far tighter ~10 edits/minute **per profile**. Redis-backed
+where available so the limit holds across every instance, with an in-process fallback that is
+correct for a single instance.
+
+> **Not yet verified:** the BullMQ round-trip itself — enqueue, consume, retry, schedule — has no
+> Redis to run against. Everything around it is tested (job identity, schedules, quota, handlers,
+> authority, JobRun bookkeeping, graceful degradation). The first thing to do when `REDIS_URL`
+> arrives is start the worker and scheduler and watch a real job flow through.

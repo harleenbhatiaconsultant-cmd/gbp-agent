@@ -10,6 +10,7 @@ import { prisma } from '@/server/db';
 import { env, isProduction } from '@/config/env.server';
 import { getWriteMode, features } from '@/config/features';
 import { childLogger } from '@/server/observability/logger';
+import { pingRedis } from '@/server/jobs/redis';
 
 export interface DependencyHealth {
   name: string;
@@ -48,16 +49,28 @@ async function checkDatabase(): Promise<DependencyHealth> {
   }
 }
 
-function checkRedis(): DependencyHealth {
-  // Phase 4. Reported as unconfigured rather than failing, so Phase 0-3 stay green.
+async function checkRedis(): Promise<DependencyHealth> {
+  // Reported as unconfigured rather than failing: background jobs are optional
+  // infrastructure, and on-demand work runs normally without them.
   if (!env.REDIS_URL) {
     return {
       name: 'redis',
       status: 'unconfigured',
-      detail: 'REDIS_URL not set; the background job layer is not active yet (Phase 4).',
+      detail:
+        'REDIS_URL not set. Scheduled syncs and audits are inactive; on-demand work is unaffected.',
     };
   }
-  return { name: 'redis', status: 'ok' };
+
+  const ping = await pingRedis();
+  if (!ping.ok) {
+    return {
+      name: 'redis',
+      status: 'error',
+      detail: `Redis is configured but unreachable: ${ping.error}`,
+    };
+  }
+
+  return { name: 'redis', status: 'ok', latencyMs: ping.latencyMs };
 }
 
 function checkGoogleOAuth(): DependencyHealth {
@@ -83,7 +96,7 @@ function checkGoogleOAuth(): DependencyHealth {
 export async function getHealthReport(): Promise<HealthReport> {
   const dependencies: DependencyHealth[] = [
     await checkDatabase(),
-    checkRedis(),
+    await checkRedis(),
     checkGoogleOAuth(),
   ];
 

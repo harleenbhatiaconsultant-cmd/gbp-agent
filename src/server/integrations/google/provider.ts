@@ -24,6 +24,11 @@ import type {
 export interface GbpProviderContext {
   /** Short-lived access token. Providers never see the refresh token. */
   accessToken: string;
+  /**
+   * The connection this call is made on behalf of. Used to key the request-rate
+   * governor, so one customer's sync cannot exhaust another's budget.
+   */
+  connectionId?: string;
   /** Correlation fields for logging. Must not contain credentials. */
   logContext?: Record<string, unknown>;
 }

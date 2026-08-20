@@ -105,6 +105,7 @@ export async function syncConnection(
   const accessToken = await getAccessToken(ctx.organizationId, connectionId);
   const providerCtx = {
     accessToken,
+    connectionId,
     logContext: { organizationId: ctx.organizationId, connectionId },
   };
 
@@ -283,7 +284,11 @@ export async function syncLocation(ctx: TenantContext, locationId: string): Prom
   const accessToken = await getAccessToken(ctx.organizationId, location.gbpAccount.connectionId);
 
   const resource = await provider.getLocation(
-    { accessToken, logContext: { organizationId: ctx.organizationId, locationId } },
+    {
+      accessToken,
+      connectionId: location.gbpAccount.connectionId,
+      logContext: { organizationId: ctx.organizationId, locationId },
+    },
     location.googleLocationName,
   );
 

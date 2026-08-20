@@ -92,23 +92,52 @@ const ROLE_CAPABILITIES: Readonly<Record<MemberRole, readonly Capability[]>> = {
   ],
 };
 
+/**
+ * What a background job may do on its own authority.
+ *
+ * Scheduled work may OBSERVE and DIAGNOSE — sync from Google, run an audit,
+ * generate a report. It may not authorize anything: approving a change,
+ * managing a connection, changing membership or billing all require a person,
+ * and are absent here deliberately.
+ *
+ * `change:execute` is also absent. A job can still carry out an approved
+ * change, but only by presenting the stored approval — see `authorizeExecution`
+ * in the changes service. That way enqueueing a job can never become a route to
+ * applying something nobody approved.
+ */
+const SYSTEM_CAPABILITIES: ReadonlySet<Capability> = new Set([
+  'organization:view',
+  'members:view',
+  'connection:view',
+  'location:view',
+  'location:sync',
+  'audit:run',
+  'report:generate',
+]);
+
 export function roleHasCapability(role: MemberRole, capability: Capability): boolean {
   return ROLE_CAPABILITIES[role].includes(capability);
 }
 
+export function systemHasCapability(capability: Capability): boolean {
+  return SYSTEM_CAPABILITIES.has(capability);
+}
+
 export function can(ctx: TenantContext, capability: Capability): boolean {
-  if (!isUserContext(ctx)) return false;
+  if (!isUserContext(ctx)) return systemHasCapability(capability);
   return roleHasCapability(ctx.role, capability);
 }
 
 /**
- * Asserts the acting user holds a capability. Throws otherwise.
+ * Asserts the acting context holds a capability. Throws otherwise.
  * Call at the top of every mutating service function.
  */
 export function requireCapability(ctx: TenantContext, capability: Capability): void {
   if (!isUserContext(ctx)) {
+    if (systemHasCapability(capability)) return;
     throw new UnauthenticatedError(
-      `Capability "${capability}" requires a signed-in user; this context is system-initiated.`,
+      `Capability "${capability}" requires a signed-in user; this context is system-initiated ` +
+        'and background work may observe and diagnose, but never authorize.',
     );
   }
   if (!roleHasCapability(ctx.role, capability)) {

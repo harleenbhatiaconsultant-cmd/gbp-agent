@@ -13,6 +13,7 @@ import {
   GbpWriteProvider,
 } from '@/server/integrations/google/provider';
 import { googleRequest, paginate, GOOGLE_API_HOSTS } from '@/server/integrations/google/client';
+import { acquireRequestSlot, acquireEditSlot } from '@/server/integrations/google/quota';
 import {
   LOCATION_READ_MASK,
   type GbpAccountResource,
@@ -27,6 +28,7 @@ export class GoogleDirectProvider implements GbpProvider, GbpWriteProvider {
   readonly id = 'google-direct';
 
   async listAccounts(ctx: GbpProviderContext): Promise<GbpAccountResource[]> {
+    await acquireRequestSlot(ctx.connectionId ?? 'unknown');
     return paginate<GbpAccountResource, GbpListAccountsResponse>(
       (pageToken) =>
         googleRequest<GbpListAccountsResponse>(
@@ -45,6 +47,7 @@ export class GoogleDirectProvider implements GbpProvider, GbpWriteProvider {
     ctx: GbpProviderContext,
     accountName: string,
   ): Promise<GbpLocationResource[]> {
+    await acquireRequestSlot(ctx.connectionId ?? 'unknown');
     return paginate<GbpLocationResource, GbpListLocationsResponse>(
       (pageToken) =>
         googleRequest<GbpListLocationsResponse>(
@@ -64,6 +67,7 @@ export class GoogleDirectProvider implements GbpProvider, GbpWriteProvider {
     ctx: GbpProviderContext,
     locationName: string,
   ): Promise<GbpLocationResource> {
+    await acquireRequestSlot(ctx.connectionId ?? 'unknown');
     return googleRequest<GbpLocationResource>(
       `${GOOGLE_API_HOSTS.businessInformation}/v1/${locationName}`,
       {
@@ -95,6 +99,12 @@ export class GoogleDirectProvider implements GbpProvider, GbpWriteProvider {
     if (updateMask.length === 0) {
       throw new Error('Refusing to patch a location with an empty updateMask.');
     }
+
+    // Writes consume BOTH budgets: the global request rate and the far tighter
+    // per-profile edit rate. The edit slot is taken first because it is the one
+    // that actually gets a profile throttled by Google.
+    await acquireEditSlot(locationName);
+    await acquireRequestSlot(ctx.connectionId ?? 'unknown');
 
     return googleRequest<GbpLocationResource>(
       `${GOOGLE_API_HOSTS.businessInformation}/v1/${locationName}`,
