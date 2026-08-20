@@ -6,9 +6,23 @@ Google Business Profile management and local SEO optimization for businesses and
 - **[DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)** — phases, MVP scope, open decisions
 - **[docs/DEPLOYMENT_RAILWAY.md](docs/DEPLOYMENT_RAILWAY.md)** — deployment topology (not deployed yet)
 
-**Current state: Phase 0 complete.** The foundation boots, the schema migrates, and the
-safety defaults are enforced in code. No product features yet — Phase 1 begins with tenancy
-and auth.
+**Current state: Phases 0, 1, 2, 3 and 5 complete.** Tenancy and auth, the Google OAuth
+connection, location import with immutable snapshots, and the audit rule engine are all
+working end to end. Running an audit produces a real health score with an explainable
+breakdown.
+
+Nothing is write-capable: no code path mutates a Google Business Profile. The executor
+registry, policy engine and approval queue are Phase 6.
+
+Try it without Google credentials:
+
+```bash
+npm run db:seed     # demo org with a healthy and a neglected location
+npm run dev         # sign in as demo@example.com, open /demo-agency/locations
+```
+
+The seed writes ordinary rows through the ordinary schema — the audit that runs against them
+is the real engine, not a mock.
 
 ---
 
@@ -109,3 +123,32 @@ triggers (hold even for raw SQL). Both are covered by `tests/integration/append-
 it injects `organizationId` into every query so a forgotten `where` is scoped rather than
 leaking. Cross-tenant reads return absent, not forbidden — confirming a resource exists in
 another tenant is itself a leak. Covered by `tests/integration/tenant-isolation.test.ts`.
+
+## The audit engine
+
+Rules live in [`src/server/audit/rules/`](src/server/audit/rules), one file each, as pure
+functions of an immutable snapshot. No I/O — enforced by a lint zone — which is what makes an
+audit reproducible months later and testable against fixtures with no database.
+
+A rule returns `pass`, `fail`, or **`skipped`**, and the third one carries the weight:
+
+> **Skipped is not pass.** Checks that could not run (reviews are not synced, the website is
+> not connected) are excluded from *both* sides of the score and reported as coverage. A
+> profile cannot look healthy because half the ruleset never ran, and the UI shows the score
+> and coverage together for exactly that reason.
+
+Findings are tracked by a stable fingerprint across runs, so `RESOLVED` means genuinely fixed.
+Re-observing the same issue marks the older row `SUPERSEDED` — collapsing the two would report
+a fix on every audit run and make the client-facing history worthless.
+
+## Status by phase
+
+| Phase | Scope | State |
+|---|---|---|
+| 0 | Foundation, schema, safety defaults | done |
+| 1 | Tenancy, auth, RBAC, invitations | done |
+| 2 | Google OAuth connection, encrypted tokens | done (needs credentials to test live) |
+| 3 | Location import, immutable snapshots | done (needs API access approval) |
+| 5 | Audit rule engine, health score, findings | done |
+| 4 | BullMQ jobs and scheduling | not started — needs Redis |
+| 6 | Executors, policy engine, approval queue | not started — first write-capable phase |

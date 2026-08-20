@@ -65,9 +65,10 @@ const eslintConfig = defineConfig([
     },
   },
 
-  // Pages and layouts: may call services, never the data or integration layers.
+  // Pages, layouts and server actions: may call services, never the data or
+  // integration layers.
   {
-    files: ["src/app/**/*.tsx"],
+    files: ["src/app/**/*.tsx", "src/app/**/*.ts"],
     rules: {
       "no-restricted-imports": [
         "error",

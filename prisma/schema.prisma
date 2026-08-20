@@ -94,7 +94,13 @@ enum FindingSeverity {
 
 enum FindingStatus {
   OPEN
+  /// The profile no longer exhibits this issue — it was genuinely fixed.
   RESOLVED
+  /// A later audit run re-observed the same issue, and its row is now the
+  /// current one. Distinct from RESOLVED: nothing was fixed, this row is just
+  /// no longer the newest observation. Conflating the two would tell a client
+  /// an issue was resolved every time an audit ran.
+  SUPERSEDED
   IGNORED
   WONT_FIX
 }

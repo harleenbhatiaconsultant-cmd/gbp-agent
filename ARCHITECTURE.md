@@ -324,6 +324,20 @@ Grouped by domain. Field lists are the significant columns, not exhaustive; ever
 N days are pruned except the first of each month and any snapshot referenced by an `AuditRun`.
 `ChangeLog`, `AuditEvent` and `PolicyViolation` are never pruned — they are the compliance record.
 
+**Consequence of append-only: a `User` cannot be deleted once they have acted.**
+`AuditEvent.actorUserId` is declared `onDelete: SetNull`, and setting it null is an UPDATE, which
+the append-only trigger refuses. Deleting such a user therefore fails at the database. This is the
+correct outcome rather than a defect — attribution in a compliance trail must not evaporate — but
+it means the GDPR erasure path is **anonymise, never delete**: overwrite the `User` row's email,
+name and image with irreversible placeholders and keep the row so historical attribution stays
+referentially intact. The same applies to `Organization`. Build that procedure deliberately in the
+data-retention phase; until then, deletion will fail loudly instead of silently destroying records.
+
+**Finding status semantics.** `AuditFinding.status` distinguishes `RESOLVED` (the profile no longer
+exhibits the issue — it was genuinely fixed) from `SUPERSEDED` (a later audit re-observed the same
+issue, so this row is simply no longer the newest observation). Collapsing the two would report a
+fix on every audit run and make the client-facing history worthless.
+
 ---
 
 ## 7. Compliance guardrail engine
