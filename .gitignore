@@ -39,3 +39,11 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+/src/generated/prisma
+
+# Keep the environment template tracked (it contains no secrets).
+!.env.example
+
+# Prisma agent-skill scaffolding is tracked (see .claude|.agents|.windsurf skills/),
+# so its lockfile is tracked with it.

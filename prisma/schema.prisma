@@ -1,0 +1,1243 @@
+// GBP Growth Agent — database schema
+// See ARCHITECTURE.md §6 for the design rationale behind these models.
+//
+// Conventions:
+//   * `Organization` is the tenant root. Every tenant-owned model carries `organizationId`.
+//     The Prisma tenant extension in src/server/db/tenant.ts enforces this at query time.
+//   * Child-only models (RankPoint, SitePage, CompetitorSnapshot) intentionally omit
+//     `organizationId` — they are only ever reached through their tenant-scoped parent.
+//     That exemption list is mirrored in src/server/db/tenant.ts and must stay in sync.
+//   * Auth.js models (User, Account, Session, VerificationToken) are global, not tenant-scoped.
+//   * APPEND-ONLY models are marked below. Updates/deletes are blocked in two places:
+//     database triggers (migration) and the Prisma extension. Do not relax either.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+enum OrganizationType {
+  BUSINESS
+  AGENCY
+}
+
+enum OrganizationStatus {
+  ACTIVE
+  SUSPENDED
+  CANCELLED
+}
+
+enum PlanTier {
+  FREE
+  STARTER
+  GROWTH
+  AGENCY
+}
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  EDITOR
+  VIEWER
+}
+
+enum ConnectionStatus {
+  ACTIVE
+  EXPIRED
+  REVOKED
+  NEEDS_RECONSENT
+  ERROR
+}
+
+enum SyncStatus {
+  PENDING
+  SYNCING
+  SYNCED
+  FAILED
+}
+
+enum VerificationState {
+  UNVERIFIED
+  PENDING
+  VERIFIED
+  SUSPENDED
+  UNKNOWN
+}
+
+enum AuditScope {
+  GBP
+  WEBSITE
+}
+
+enum AuditRunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum FindingSeverity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+  INFO
+}
+
+enum FindingStatus {
+  OPEN
+  RESOLVED
+  IGNORED
+  WONT_FIX
+}
+
+enum RecommendationSource {
+  RULE
+  AI
+}
+
+enum RecommendationStatus {
+  PROPOSED
+  ACCEPTED
+  DISMISSED
+  EXPIRED
+  SUPERSEDED
+}
+
+/// The complete allowlist of mutations this platform can perform.
+/// The AI proposes a member of this enum plus a payload; it can never invent an action.
+/// Adding a value here requires a matching executor, Zod schema and policy rule.
+enum ActionType {
+  UPDATE_TITLE
+  UPDATE_CATEGORIES
+  UPDATE_DESCRIPTION
+  UPDATE_REGULAR_HOURS
+  UPDATE_SPECIAL_HOURS
+  UPDATE_PHONE
+  UPDATE_WEBSITE
+  UPDATE_ADDRESS
+  UPDATE_SERVICE_AREA
+  UPDATE_ATTRIBUTES
+  UPDATE_LABELS
+  UPDATE_OPENING_DATE
+  CREATE_POST
+  DELETE_POST
+  REPLY_TO_REVIEW
+  UPDATE_REVIEW_REPLY
+  DELETE_REVIEW_REPLY
+  UPLOAD_MEDIA
+  DELETE_MEDIA
+}
+
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum ChangeRequestStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  SCHEDULED
+  EXECUTING
+  EXECUTED
+  FAILED
+  ROLLED_BACK
+}
+
+enum ExecutionStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+  SKIPPED
+}
+
+enum ChangeActor {
+  SYSTEM
+  USER
+  AI_ASSISTED
+}
+
+enum PolicyDecisionType {
+  ALLOW
+  REQUIRE_HUMAN
+  BLOCK
+}
+
+enum PostTopicType {
+  STANDARD
+  EVENT
+  OFFER
+  ALERT
+}
+
+enum PostStatus {
+  DRAFT
+  PENDING_APPROVAL
+  SCHEDULED
+  PUBLISHED
+  FAILED
+  DELETED
+}
+
+enum ReviewStatus {
+  NEW
+  NEEDS_RESPONSE
+  RESPONDED
+  IGNORED
+}
+
+enum ReviewSentiment {
+  POSITIVE
+  NEUTRAL
+  NEGATIVE
+  MIXED
+}
+
+enum DraftStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  PUBLISHED
+  REJECTED
+}
+
+/// Mirrors Google's Business Profile Performance API DailyMetric values.
+enum PerformanceMetricType {
+  BUSINESS_IMPRESSIONS_DESKTOP_MAPS
+  BUSINESS_IMPRESSIONS_DESKTOP_SEARCH
+  BUSINESS_IMPRESSIONS_MOBILE_MAPS
+  BUSINESS_IMPRESSIONS_MOBILE_SEARCH
+  BUSINESS_CONVERSATIONS
+  BUSINESS_DIRECTION_REQUESTS
+  CALL_CLICKS
+  WEBSITE_CLICKS
+  BUSINESS_BOOKINGS
+  BUSINESS_FOOD_ORDERS
+  BUSINESS_FOOD_MENU_CLICKS
+}
+
+enum ScanStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum AiPurpose {
+  RECOMMENDATION
+  REVIEW_RESPONSE
+  REVIEW_CLASSIFICATION
+  POST_COPY
+  DESCRIPTION_DRAFT
+  REPORT_NARRATIVE
+}
+
+enum AiStatus {
+  SUCCESS
+  ERROR
+  BLOCKED_BY_POLICY
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum ReportType {
+  MONTHLY
+  QUARTERLY
+  AUDIT
+  CUSTOM
+}
+
+enum ReportStatus {
+  PENDING
+  GENERATING
+  READY
+  FAILED
+}
+
+enum ReportCadence {
+  WEEKLY
+  MONTHLY
+  QUARTERLY
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  INCOMPLETE
+}
+
+// ============================================================================
+// TENANCY & IDENTITY
+// ============================================================================
+
+model Organization {
+  id                   String             @id @default(cuid())
+  name                 String
+  slug                 String             @unique
+  type                 OrganizationType   @default(BUSINESS)
+  status               OrganizationStatus @default(ACTIVE)
+  plan                 PlanTier           @default(FREE)
+  /// White-label branding for agency accounts (logo, colors, custom domain).
+  branding             Json?
+  /// Per-org settings, including the per-action-type auto-apply allowlist.
+  /// Auto-apply is OFF unless a key is explicitly present here AND the global
+  /// ENABLE_AUTO_APPLY flag is true. See src/config/features.ts.
+  settings             Json?
+  parentOrganizationId String?
+  parentOrganization   Organization?      @relation("OrgHierarchy", fields: [parentOrganizationId], references: [id], onDelete: SetNull)
+  childOrganizations   Organization[]     @relation("OrgHierarchy")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships        Membership[]
+  invitations        Invitation[]
+  apiKeys            ApiKey[]
+  auditEvents        AuditEvent[]
+  googleConnections  GoogleConnection[]
+  gbpAccounts        GbpAccount[]
+  locations          Location[]
+  locationSnapshots  LocationSnapshot[]
+  auditRuns          AuditRun[]
+  auditFindings      AuditFinding[]
+  recommendations    Recommendation[]
+  changeRequests     ChangeRequest[]
+  changeExecutions   ChangeExecution[]
+  changeLogs         ChangeLog[]
+  verifications      Verification[]
+  policyViolations   PolicyViolation[]
+  posts              GbpPost[]
+  reviews            Review[]
+  reviewDrafts       ReviewResponseDraft[]
+  performanceMetrics PerformanceMetric[]
+  keywords           Keyword[]
+  rankScans          RankScan[]
+  competitors        Competitor[]
+  websiteProperties  WebsiteProperty[]
+  siteCrawls         SiteCrawl[]
+  aiInteractions     AiInteraction[]
+  jobRuns            JobRun[]
+  reports            Report[]
+  reportSchedules    ReportSchedule[]
+  subscription       Subscription?
+  usageRecords       UsageRecord[]
+
+  @@index([parentOrganizationId])
+  @@index([status])
+}
+
+/// Global identity. A user may belong to many organizations via Membership.
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  lastLoginAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  accounts            Account[]
+  sessions            Session[]
+  memberships         Membership[]
+  invitationsSent     Invitation[]          @relation("InvitationInviter")
+  auditEvents         AuditEvent[]
+  requestedChanges    ChangeRequest[]       @relation("ChangeRequester")
+  approvedChanges     ChangeRequest[]       @relation("ChangeApprover")
+  changeLogs          ChangeLog[]
+  createdPosts        GbpPost[]
+  approvedDrafts      ReviewResponseDraft[]
+  createdReports      Report[]
+}
+
+/// Auth.js account record — LOGIN credentials only.
+/// Google Business Profile tokens live in GoogleConnection, encrypted at rest.
+/// Never use tokens from this table to call the Business Profile APIs.
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model Membership {
+  id             String       @id @default(cuid())
+  userId         String
+  organizationId String
+  role           MemberRole   @default(VIEWER)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+  @@index([organizationId])
+}
+
+model Invitation {
+  id             String     @id @default(cuid())
+  organizationId String
+  email          String
+  role           MemberRole @default(VIEWER)
+  tokenHash      String     @unique
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  invitedByUserId String?
+
+  createdAt DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  invitedBy    User?        @relation("InvitationInviter", fields: [invitedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([email])
+}
+
+model ApiKey {
+  id             String    @id @default(cuid())
+  organizationId String
+  name           String
+  /// SHA-256 of the key. The plaintext key is shown once at creation and never stored.
+  keyHash        String    @unique
+  prefix         String
+  scopes         String[]
+  lastUsedAt     DateTime?
+  revokedAt      DateTime?
+
+  createdAt DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+}
+
+/// APPEND-ONLY. Security and authorization trail: who did what, from where.
+/// Distinct from ChangeLog, which records profile mutations.
+model AuditEvent {
+  id             String   @id @default(cuid())
+  organizationId String
+  actorUserId    String?
+  action         String
+  subjectType    String
+  subjectId      String?
+  ip             String?
+  userAgent      String?
+  metadata       Json?
+
+  createdAt DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  actor        User?        @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([actorUserId])
+  @@index([subjectType, subjectId])
+}
+
+// ============================================================================
+// GOOGLE CONNECTION & LOCATIONS
+// ============================================================================
+
+model GoogleConnection {
+  id                    String           @id @default(cuid())
+  organizationId        String
+  googleAccountEmail    String
+  /// AES-256-GCM ciphertext. Never selected into an API response or log line.
+  encryptedRefreshToken String
+  encryptionKeyVersion  Int              @default(1)
+  accessTokenExpiresAt  DateTime?
+  scopes                String[]
+  status                ConnectionStatus @default(ACTIVE)
+  lastRefreshAt         DateTime?
+  lastSyncedAt          DateTime?
+  lastError             String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  gbpAccounts  GbpAccount[]
+
+  @@unique([organizationId, googleAccountEmail])
+  @@index([status])
+}
+
+model GbpAccount {
+  id                String            @id @default(cuid())
+  organizationId    String
+  connectionId      String
+  /// Google resource name, e.g. "accounts/123456789".
+  googleAccountName String
+  accountName       String?
+  accountType       String?
+  role              String?
+  verificationState VerificationState @default(UNKNOWN)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  connection   GoogleConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  locations    Location[]
+
+  @@unique([organizationId, googleAccountName])
+  @@index([connectionId])
+}
+
+model Location {
+  id                  String            @id @default(cuid())
+  organizationId      String
+  gbpAccountId        String
+  /// Google resource name, e.g. "locations/987654321".
+  googleLocationName  String
+  storeCode           String?
+  title               String
+  primaryCategoryId   String?
+  primaryCategoryName String?
+  secondaryCategories Json?
+  address             Json?
+  latitude            Float?
+  longitude           Float?
+  phone               String?
+  additionalPhones    String[]
+  websiteUri          String?
+  regularHours        Json?
+  specialHours        Json?
+  moreHours           Json?
+  attributes          Json?
+  profileDescription  String?           @db.Text
+  openInfo            Json?
+  serviceArea         Json?
+  labels              String[]
+  verificationState   VerificationState @default(UNKNOWN)
+  isSuspended         Boolean           @default(false)
+  photoCount          Int               @default(0)
+  lastPhotoAt         DateTime?
+  lastPostAt          DateTime?
+  healthScore         Int?
+  lastAuditAt         DateTime?
+  lastSyncedAt        DateTime?
+  syncStatus          SyncStatus        @default(PENDING)
+  syncError           String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization       Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  gbpAccount         GbpAccount          @relation(fields: [gbpAccountId], references: [id], onDelete: Cascade)
+  snapshots          LocationSnapshot[]
+  auditRuns          AuditRun[]
+  auditFindings      AuditFinding[]
+  recommendations    Recommendation[]
+  changeRequests     ChangeRequest[]
+  changeLogs         ChangeLog[]
+  posts              GbpPost[]
+  reviews            Review[]
+  performanceMetrics PerformanceMetric[]
+  keywords           Keyword[]
+  rankScans          RankScan[]
+  competitors        Competitor[]
+  websiteProperties  WebsiteProperty[]
+
+  @@unique([organizationId, googleLocationName])
+  @@index([gbpAccountId])
+  @@index([organizationId, syncStatus])
+}
+
+/// Immutable point-in-time capture of a location as returned by Google.
+/// Audits run against snapshots, never against the mutable Location row —
+/// this is what makes an audit reproducible months later.
+model LocationSnapshot {
+  id             String   @id @default(cuid())
+  organizationId String
+  locationId     String
+  capturedAt     DateTime @default(now())
+  source         String   @default("GBP_API")
+  rawPayload     Json
+  /// SHA-256 of the normalized payload. Equal hashes mean nothing changed.
+  contentHash    String
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  location     Location     @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  auditRuns    AuditRun[]
+
+  @@index([locationId, capturedAt])
+  @@index([locationId, contentHash])
+}
+
+// ============================================================================
+// AUDIT, RECOMMENDATION, CHANGE PIPELINE
+// ============================================================================
+
+model AuditRun {
+  id             String         @id @default(cuid())
+  organizationId String
+  locationId     String
+  snapshotId     String?
+  rulesetVersion String
+  status         AuditRunStatus @default(PENDING)
+  healthScore    Int?
+  scoreBreakdown Json?
+  startedAt      DateTime       @default(now())
+  completedAt    DateTime?
+  error          String?
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  location     Location          @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  snapshot     LocationSnapshot? @relation(fields: [snapshotId], references: [id], onDelete: SetNull)
+  findings     AuditFinding[]
+
+  @@index([locationId, startedAt])
+  @@index([organizationId, status])
+}
+
+model AuditFinding {
+  id                  String          @id @default(cuid())
+  organizationId      String
+  auditRunId          String
+  locationId          String
+  scope               AuditScope      @default(GBP)
+  ruleId              String
+  category            String
+  severity            FindingSeverity
+  status              FindingStatus   @default(OPEN)
+  title               String
+  detail              String          @db.Text
+  evidence            Json?
+  autoFixable         Boolean         @default(false)
+  suggestedActionType ActionType?
+  /// Stable identity for "the same issue" across runs, so a finding can be
+  /// tracked from open through resolved rather than duplicated each week.
+  fingerprint         String
+  resolvedAt          DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  auditRun        AuditRun         @relation(fields: [auditRunId], references: [id], onDelete: Cascade)
+  location        Location         @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  recommendations Recommendation[]
+
+  @@unique([auditRunId, fingerprint])
+  @@index([locationId, status])
+  @@index([organizationId, severity, status])
+}
+
+model Recommendation {
+  id              String               @id @default(cuid())
+  organizationId  String
+  locationId      String
+  findingId       String?
+  source          RecommendationSource
+  actionType      ActionType
+  proposedPayload Json
+  rationale       String               @db.Text
+  confidence      Float?
+  aiInteractionId String?
+  status          RecommendationStatus @default(PROPOSED)
+  expiresAt       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  location       Location        @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  finding        AuditFinding?   @relation(fields: [findingId], references: [id], onDelete: SetNull)
+  aiInteraction  AiInteraction?  @relation(fields: [aiInteractionId], references: [id], onDelete: SetNull)
+  changeRequests ChangeRequest[]
+
+  @@index([locationId, status])
+  @@index([findingId])
+  @@index([aiInteractionId])
+}
+
+model ChangeRequest {
+  id                String              @id @default(cuid())
+  organizationId    String
+  locationId        String
+  recommendationId  String?
+  actionType        ActionType
+  payload           Json
+  riskLevel         RiskLevel           @default(MEDIUM)
+  /// Full policy engine output: decision, matched rules, reasons.
+  policyDecision    Json?
+  status            ChangeRequestStatus @default(DRAFT)
+  requestedByUserId String?
+  approvedByUserId  String?
+  approvedAt        DateTime?
+  rejectedReason    String?
+  scheduledFor      DateTime?
+  /// Unique per logical change. A retried job that finds a terminal execution
+  /// for this key returns the prior result instead of re-sending to Google.
+  idempotencyKey    String              @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization   Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  location       Location             @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  recommendation Recommendation?      @relation(fields: [recommendationId], references: [id], onDelete: SetNull)
+  requestedBy    User?                @relation("ChangeRequester", fields: [requestedByUserId], references: [id], onDelete: SetNull)
+  approvedBy     User?                @relation("ChangeApprover", fields: [approvedByUserId], references: [id], onDelete: SetNull)
+  executions     ChangeExecution[]
+  changeLogs     ChangeLog[]
+  post           GbpPost?
+  reviewDraft    ReviewResponseDraft?
+
+  @@index([organizationId, status])
+  @@index([locationId, status])
+  @@index([status, scheduledFor])
+}
+
+model ChangeExecution {
+  id              String          @id @default(cuid())
+  organizationId  String
+  changeRequestId String
+  attempt         Int             @default(1)
+  /// True when sent to Google with validateOnly=true. Nothing was mutated.
+  dryRun          Boolean         @default(true)
+  status          ExecutionStatus @default(PENDING)
+  requestPayload  Json?
+  responsePayload Json?
+  beforeState     Json?
+  afterState      Json?
+  googleRequestId String?
+  errorCode       String?
+  errorMessage    String?         @db.Text
+  startedAt       DateTime        @default(now())
+  finishedAt      DateTime?
+
+  organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  changeRequest ChangeRequest  @relation(fields: [changeRequestId], references: [id], onDelete: Cascade)
+  verifications Verification[]
+
+  @@unique([changeRequestId, attempt])
+  @@index([organizationId, status])
+}
+
+/// APPEND-ONLY. The client-facing "here is what we did" history.
+/// Written in the same transaction as the ChangeRequest status transition, so
+/// "we applied it" and "we recorded it" can never diverge.
+model ChangeLog {
+  id              String      @id @default(cuid())
+  organizationId  String
+  locationId      String
+  changeRequestId String?
+  actor           ChangeActor
+  actorUserId     String?
+  actionType      ActionType
+  summary         String
+  beforeState     Json?
+  afterState      Json?
+
+  createdAt DateTime @default(now())
+
+  organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  location      Location       @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  changeRequest ChangeRequest? @relation(fields: [changeRequestId], references: [id], onDelete: SetNull)
+  actorUser     User?          @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([locationId, createdAt])
+  @@index([changeRequestId])
+}
+
+/// Post-execution confirmation that Google actually persisted the change.
+/// A mismatch reopens the finding — this is what closes the optimization loop.
+model Verification {
+  id                String   @id @default(cuid())
+  organizationId    String
+  changeExecutionId String
+  verifiedAt        DateTime @default(now())
+  matched           Boolean
+  observedState     Json?
+  notes             String?
+
+  organization    Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  changeExecution ChangeExecution @relation(fields: [changeExecutionId], references: [id], onDelete: Cascade)
+
+  @@index([changeExecutionId])
+  @@index([organizationId, matched])
+}
+
+/// APPEND-ONLY. Every guardrail block or human-review escalation.
+/// This is the compliance record proving the platform refused policy-violating work.
+model PolicyViolation {
+  id             String             @id @default(cuid())
+  organizationId String
+  subjectType    String
+  subjectId      String?
+  ruleId         String
+  decision       PolicyDecisionType
+  severity       FindingSeverity    @default(HIGH)
+  detail         String             @db.Text
+  payloadSample  Json?
+
+  createdAt DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+  @@index([ruleId])
+}
+
+// ============================================================================
+// CONTENT: POSTS & REVIEWS
+// ============================================================================
+
+model GbpPost {
+  id              String        @id @default(cuid())
+  organizationId  String
+  locationId      String
+  googlePostName  String?
+  topicType       PostTopicType @default(STANDARD)
+  summary         String        @db.Text
+  mediaUrls       String[]
+  callToAction    Json?
+  event           Json?
+  offer           Json?
+  status          PostStatus    @default(DRAFT)
+  scheduledFor    DateTime?
+  publishedAt     DateTime?
+  aiGenerated     Boolean       @default(false)
+  createdByUserId String?
+  changeRequestId String?       @unique
+  failureReason   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  location      Location       @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  createdBy     User?          @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+  changeRequest ChangeRequest? @relation(fields: [changeRequestId], references: [id], onDelete: SetNull)
+
+  @@index([locationId, status])
+  @@index([status, scheduledFor])
+}
+
+model Review {
+  id                  String           @id @default(cuid())
+  organizationId      String
+  locationId          String
+  googleReviewId      String           @unique
+  reviewerDisplayName String?
+  reviewerPhotoUrl    String?
+  reviewerIsAnonymous Boolean          @default(false)
+  starRating          Int
+  comment             String?          @db.Text
+  createTime          DateTime
+  updateTime          DateTime
+  replyComment        String?          @db.Text
+  replyUpdateTime     DateTime?
+  sentiment           ReviewSentiment?
+  topics              String[]
+  status              ReviewStatus     @default(NEW)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  location     Location              @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  drafts       ReviewResponseDraft[]
+
+  @@index([locationId, status])
+  @@index([organizationId, createTime])
+  @@index([locationId, starRating])
+}
+
+/// AI-drafted OWNER responses to real reviews.
+/// The platform never generates review content itself — see ARCHITECTURE.md §7.
+model ReviewResponseDraft {
+  id               String      @id @default(cuid())
+  organizationId   String
+  reviewId         String
+  content          String      @db.Text
+  tone             String?
+  aiInteractionId  String?
+  status           DraftStatus @default(DRAFT)
+  approvedByUserId String?
+  approvedAt       DateTime?
+  publishedAt      DateTime?
+  changeRequestId  String?     @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  review        Review         @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  aiInteraction AiInteraction? @relation(fields: [aiInteractionId], references: [id], onDelete: SetNull)
+  approvedBy    User?          @relation(fields: [approvedByUserId], references: [id], onDelete: SetNull)
+  changeRequest ChangeRequest? @relation(fields: [changeRequestId], references: [id], onDelete: SetNull)
+
+  @@index([reviewId, status])
+  @@index([organizationId, status])
+  @@index([aiInteractionId])
+}
+
+// ============================================================================
+// MEASUREMENT: PERFORMANCE, RANK, COMPETITORS
+// ============================================================================
+
+model PerformanceMetric {
+  id             String                @id @default(cuid())
+  organizationId String
+  locationId     String
+  date           DateTime              @db.Date
+  metric         PerformanceMetricType
+  value          Int
+
+  createdAt DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  location     Location     @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@unique([locationId, date, metric])
+  @@index([organizationId, date])
+}
+
+model Keyword {
+  id             String  @id @default(cuid())
+  organizationId String
+  locationId     String
+  phrase         String
+  locale         String  @default("en-US")
+  isPrimary      Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  location     Location     @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  rankScans    RankScan[]
+
+  @@unique([locationId, phrase, locale])
+  @@index([organizationId])
+}
+
+/// One geo-grid scan from a licensed third-party rank provider.
+/// Google has no first-party local-pack position endpoint, and scraping its
+/// SERPs violates its Terms of Service. See ARCHITECTURE.md §4.4.
+model RankScan {
+  id             String     @id @default(cuid())
+  organizationId String
+  locationId     String
+  keywordId      String
+  provider       String
+  gridSize       Int
+  radiusMeters   Int
+  status         ScanStatus @default(PENDING)
+  scannedAt      DateTime   @default(now())
+  avgRank        Float?
+  top3Share      Float?
+  costCents      Int?
+  error          String?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  location     Location     @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  keyword      Keyword      @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+  points       RankPoint[]
+
+  @@index([locationId, scannedAt])
+  @@index([keywordId, scannedAt])
+}
+
+/// One cell of a geo-grid scan. Child-only: always reached via RankScan,
+/// so it deliberately carries no organizationId (see tenant.ts exemption list).
+model RankPoint {
+  id             String  @id @default(cuid())
+  rankScanId     String
+  latitude       Float
+  longitude      Float
+  rank           Int?
+  matchedPlaceId String?
+
+  rankScan RankScan @relation(fields: [rankScanId], references: [id], onDelete: Cascade)
+
+  @@index([rankScanId])
+}
+
+model Competitor {
+  id             String  @id @default(cuid())
+  organizationId String
+  locationId     String
+  placeId        String
+  name           String
+  category       String?
+  websiteUrl     String?
+  isTracked      Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  location     Location             @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  snapshots    CompetitorSnapshot[]
+
+  @@unique([locationId, placeId])
+  @@index([organizationId])
+}
+
+/// Child-only: always reached via Competitor, so no organizationId.
+model CompetitorSnapshot {
+  id              String   @id @default(cuid())
+  competitorId    String
+  capturedAt      DateTime @default(now())
+  rating          Float?
+  reviewCount     Int?
+  categories      Json?
+  photoCount      Int?
+  postCadenceDays Float?
+  rawPayload      Json?
+
+  competitor Competitor @relation(fields: [competitorId], references: [id], onDelete: Cascade)
+
+  @@index([competitorId, capturedAt])
+}
+
+// ============================================================================
+// WEBSITE AUDIT
+// ============================================================================
+
+model WebsiteProperty {
+  id             String    @id @default(cuid())
+  organizationId String
+  locationId     String?
+  rootUrl        String
+  gscSiteUrl     String?
+  verifiedAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  location     Location?    @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  crawls       SiteCrawl[]
+
+  @@unique([organizationId, rootUrl])
+  @@index([locationId])
+}
+
+model SiteCrawl {
+  id                String     @id @default(cuid())
+  organizationId    String
+  websitePropertyId String
+  status            ScanStatus @default(PENDING)
+  pagesCrawled      Int        @default(0)
+  startedAt         DateTime   @default(now())
+  finishedAt        DateTime?
+  error             String?
+
+  organization    Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  websiteProperty WebsiteProperty @relation(fields: [websitePropertyId], references: [id], onDelete: Cascade)
+  pages           SitePage[]
+
+  @@index([websitePropertyId, startedAt])
+}
+
+/// Child-only: always reached via SiteCrawl, so no organizationId.
+model SitePage {
+  id              String   @id @default(cuid())
+  siteCrawlId     String
+  url             String
+  statusCode      Int?
+  title           String?
+  metaDescription String?  @db.Text
+  h1              String?
+  wordCount       Int      @default(0)
+  schemaTypes     String[]
+  napFound        Json?
+
+  crawl SiteCrawl @relation(fields: [siteCrawlId], references: [id], onDelete: Cascade)
+
+  @@index([siteCrawlId])
+}
+
+// ============================================================================
+// PLATFORM: AI, JOBS, REPORTS, BILLING
+// ============================================================================
+
+/// Every LLM call, for cost attribution and quality-regression tracing.
+model AiInteraction {
+  id             String    @id @default(cuid())
+  organizationId String
+  provider       String
+  model          String
+  purpose        AiPurpose
+  promptVersion  String
+  promptHash     String
+  inputTokens    Int       @default(0)
+  outputTokens   Int       @default(0)
+  costUsdCents   Int       @default(0)
+  latencyMs      Int       @default(0)
+  status         AiStatus  @default(SUCCESS)
+  errorMessage   String?
+
+  createdAt DateTime @default(now())
+
+  organization    Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  recommendations Recommendation[]
+  reviewDrafts    ReviewResponseDraft[]
+
+  @@index([organizationId, createdAt])
+  @@index([purpose, createdAt])
+}
+
+model JobRun {
+  id             String    @id @default(cuid())
+  organizationId String?
+  queue          String
+  jobName        String
+  jobId          String?
+  status         JobStatus @default(QUEUED)
+  attempts       Int       @default(0)
+  payload        Json?
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  error          String?   @db.Text
+
+  createdAt DateTime @default(now())
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([queue, status])
+  @@index([organizationId, createdAt])
+}
+
+model Report {
+  id              String       @id @default(cuid())
+  organizationId  String
+  locationIds     String[]
+  type            ReportType   @default(MONTHLY)
+  periodStart     DateTime
+  periodEnd       DateTime
+  status          ReportStatus @default(PENDING)
+  storageKey      String?
+  generatedAt     DateTime?
+  createdByUserId String?
+
+  createdAt DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy    User?        @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, periodStart])
+}
+
+model ReportSchedule {
+  id             String        @id @default(cuid())
+  organizationId String
+  cadence        ReportCadence @default(MONTHLY)
+  recipients     String[]
+  template       String        @default("default")
+  nextRunAt      DateTime
+  isActive       Boolean       @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([nextRunAt, isActive])
+}
+
+model Subscription {
+  id                   String             @id @default(cuid())
+  organizationId       String             @unique
+  stripeCustomerId     String?            @unique
+  stripeSubscriptionId String?            @unique
+  plan                 PlanTier           @default(FREE)
+  status               SubscriptionStatus @default(TRIALING)
+  currentPeriodStart   DateTime?
+  currentPeriodEnd     DateTime?
+  cancelAtPeriodEnd    Boolean            @default(false)
+  locationQuota        Int                @default(1)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+}
+
+model PlanLimit {
+  id                 String   @id @default(cuid())
+  plan               PlanTier @unique
+  maxLocations       Int
+  maxUsers           Int
+  maxRankScansPerMo  Int
+  maxAiCostCentsPerMo Int
+  allowAutoApply     Boolean  @default(false)
+  allowWhiteLabel    Boolean  @default(false)
+
+  updatedAt DateTime @updatedAt
+}
+
+model UsageRecord {
+  id             String   @id @default(cuid())
+  organizationId String
+  periodStart    DateTime @db.Date
+  metric         String
+  quantity       Int      @default(0)
+
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, periodStart, metric])
+}
