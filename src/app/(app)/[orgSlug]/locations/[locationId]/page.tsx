@@ -1,12 +1,14 @@
 import { revalidatePath } from "next/cache";
 import { redirect, notFound } from "next/navigation";
 import Link from "next/link";
-import { FindingStatus } from "@/generated/prisma/enums";
+import { ActionType, FindingStatus } from "@/generated/prisma/enums";
 import { resolveTenantContext } from "@/server/auth/session";
 import { getLocation, syncLocation } from "@/server/services/locations";
 import { runLocationAudit, getLatestAuditRun, listAuditHistory } from "@/server/services/audits";
+import { proposeChange, getChangeLog } from "@/server/services/changes";
 import { can } from "@/server/auth/rbac";
 import { isAppError } from "@/server/errors";
+import { ProposeFix, isProposable } from "@/components/features/propose-fix";
 import type { HealthScore as HealthScoreShape } from "@/server/audit/scoring";
 import { HealthScore } from "@/components/features/health-score";
 import { FindingsList } from "@/components/features/findings-list";
@@ -31,6 +33,58 @@ async function runAuditAction(formData: FormData) {
   } catch (error) {
     if (isAppError(error)) {
       redirect(`${path}?error=${encodeURIComponent(error.expose ? error.message : "Audit failed.")}`);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Turns a finding into a change proposal.
+ *
+ * The payload is assembled here from the form, never inferred: the value and
+ * its source are both supplied by a person, which is what the fabrication
+ * guard requires for factual fields.
+ */
+async function proposeFixAction(formData: FormData) {
+  "use server";
+  const orgSlug = String(formData.get("orgSlug"));
+  const locationId = String(formData.get("locationId"));
+  const actionType = String(formData.get("actionType")) as ActionType;
+  const value = String(formData.get("value") ?? "").trim();
+  const sourceRef = {
+    kind: String(formData.get("sourceKind") ?? "USER_INPUT"),
+    detail: String(formData.get("sourceDetail") ?? "").trim(),
+  };
+  const path = `/${orgSlug}/locations/${locationId}`;
+
+  const payloadByAction: Record<string, Record<string, unknown>> = {
+    UPDATE_WEBSITE: { websiteUri: value, sourceRef },
+    UPDATE_PHONE: { primaryPhone: value, additionalPhones: [], sourceRef },
+    UPDATE_DESCRIPTION: { description: value, sourceRef },
+    UPDATE_TITLE: { title: value, sourceRef },
+  };
+
+  const payload = payloadByAction[actionType];
+  if (!payload) redirect(`${path}?error=${encodeURIComponent("Unsupported action.")}`);
+
+  try {
+    const ctx = await resolveTenantContext(orgSlug);
+    const result = await proposeChange(ctx, { locationId, actionType, payload });
+    revalidatePath(path);
+    redirect(
+      `${path}?proposed=${encodeURIComponent(
+        result.deduplicated
+          ? "An identical proposal was already queued."
+          : "Proposed. It is waiting in the approval queue.",
+      )}`,
+    );
+  } catch (error) {
+    if (isAppError(error)) {
+      redirect(
+        `${path}?error=${encodeURIComponent(
+          error.expose ? error.message : "Could not propose this change.",
+        )}`,
+      );
     }
     throw error;
   }
@@ -71,12 +125,14 @@ export default async function LocationDetailPage({
     throw error;
   }
 
-  const [auditRun, history] = await Promise.all([
+  const [auditRun, history, changeLog] = await Promise.all([
     getLatestAuditRun(ctx, locationId),
     listAuditHistory(ctx, locationId, 10),
+    getChangeLog(ctx, locationId, 20),
   ]);
 
   const canRun = can(ctx, "audit:run");
+  const canDraft = can(ctx, "change:draft");
   const health = auditRun?.scoreBreakdown as unknown as HealthScoreShape | null;
   const openFindings = (auditRun?.findings ?? []).filter(
     (finding) => finding.status === FindingStatus.OPEN,
@@ -85,6 +141,11 @@ export default async function LocationDetailPage({
   const error = typeof query.error === "string" ? query.error : null;
   const audited = typeof query.audited === "string" ? query.audited : null;
   const synced = typeof query.synced === "string" ? query.synced : null;
+  const proposed = typeof query.proposed === "string" ? query.proposed : null;
+
+  const fixableFindings = openFindings.filter(
+    (finding) => finding.autoFixable && isProposable(finding.suggestedActionType),
+  );
 
   return (
     <div className="space-y-6">
@@ -147,6 +208,16 @@ export default async function LocationDetailPage({
           </AlertDescription>
         </Alert>
       ) : null}
+      {proposed ? (
+        <Alert>
+          <AlertDescription>
+            {proposed}{" "}
+            <Link href={`/${orgSlug}/approvals`} className="underline">
+              Go to approvals
+            </Link>
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
       {!auditRun || !health ? (
         <Card>
@@ -201,6 +272,63 @@ export default async function LocationDetailPage({
           </section>
         </>
       )}
+
+      {canDraft && fixableFindings.length > 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Propose a fix</CardTitle>
+            <CardDescription>
+              Proposals go through the compliance guardrails, then wait for approval. Nothing is
+              sent to Google until an owner or admin approves it.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {fixableFindings.map((finding) => (
+              <div key={finding.id} className="space-y-2">
+                <p className="text-sm font-medium">{finding.title}</p>
+                <ProposeFix
+                  orgSlug={orgSlug}
+                  locationId={locationId}
+                  findingId={finding.id}
+                  actionType={finding.suggestedActionType as never}
+                  action={proposeFixAction}
+                />
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {changeLog.length > 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Change history</CardTitle>
+            <CardDescription>
+              Every change applied to this profile, permanently recorded.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ul className="divide-border divide-y text-sm">
+              {changeLog.map((entry) => (
+                <li key={entry.id} className="py-2.5">
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                    <span className="font-medium">{entry.summary}</span>
+                    <span className="text-muted-foreground text-xs">
+                      {entry.createdAt.toLocaleString()}
+                    </span>
+                  </div>
+                  <span className="text-muted-foreground text-xs">
+                    {entry.actionType} ·{" "}
+                    {entry.actorUser
+                      ? (entry.actorUser.name ?? entry.actorUser.email)
+                      : entry.actor.toLowerCase()}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
+      ) : null}
 
       {history.length > 1 ? (
         <Card>

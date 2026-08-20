@@ -195,9 +195,10 @@ export default async function ConnectionsPage({
       )}
 
       <p className="text-muted-foreground text-xs leading-relaxed">
-        Disconnecting revokes the token at Google and deletes the stored credential along with the
-        imported profile data. Refresh tokens are encrypted at rest and are never returned to the
-        browser.
+        Disconnecting revokes the authorization at Google and destroys the stored credential.
+        Imported locations and their change history are retained — the record of what was changed
+        on a business listing is kept deliberately, and erasing a tenant is a separate operation.
+        Refresh tokens are encrypted at rest and are never returned to the browser.
       </p>
     </div>
   );

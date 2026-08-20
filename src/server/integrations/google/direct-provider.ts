@@ -7,7 +7,11 @@
  * generic failure.
  */
 
-import { GbpProvider, GbpProviderContext } from '@/server/integrations/google/provider';
+import {
+  GbpProvider,
+  GbpProviderContext,
+  GbpWriteProvider,
+} from '@/server/integrations/google/provider';
 import { googleRequest, paginate, GOOGLE_API_HOSTS } from '@/server/integrations/google/client';
 import {
   LOCATION_READ_MASK,
@@ -19,7 +23,7 @@ import {
 
 const PAGE_SIZE = 100;
 
-export class GoogleDirectProvider implements GbpProvider {
+export class GoogleDirectProvider implements GbpProvider, GbpWriteProvider {
   readonly id = 'google-direct';
 
   async listAccounts(ctx: GbpProviderContext): Promise<GbpAccountResource[]> {
@@ -69,6 +73,67 @@ export class GoogleDirectProvider implements GbpProvider {
       },
     );
   }
+
+  /**
+   * Patches a location.
+   *
+   * `validateOnly` is a required parameter rather than an option with a
+   * default, so no call site can omit it and accidentally perform a live write.
+   * When true, Google validates the request and changes nothing — the only
+   * rehearsal available, since there is no sandbox.
+   *
+   * `updateMask` is mandatory and Google replaces ONLY the masked fields. A
+   * mask wider than the patch erases data, so executors build the two together.
+   */
+  async updateLocation(
+    ctx: GbpProviderContext,
+    locationName: string,
+    patch: Partial<GbpLocationResource>,
+    updateMask: string[],
+    options: { validateOnly: boolean },
+  ): Promise<GbpLocationResource> {
+    if (updateMask.length === 0) {
+      throw new Error('Refusing to patch a location with an empty updateMask.');
+    }
+
+    return googleRequest<GbpLocationResource>(
+      `${GOOGLE_API_HOSTS.businessInformation}/v1/${locationName}`,
+      {
+        method: 'PATCH',
+        accessToken: ctx.accessToken,
+        query: {
+          updateMask: updateMask.join(','),
+          validateOnly: options.validateOnly,
+        },
+        body: patch,
+        logContext: {
+          ...ctx.logContext,
+          op: 'updateLocation',
+          locationName,
+          updateMask,
+          validateOnly: options.validateOnly,
+        },
+      },
+    );
+  }
+}
+
+/**
+ * Test seam.
+ *
+ * Google has no sandbox, so executor and approval-pipeline tests run against a
+ * recorded double installed here. Production never calls this — an override is
+ * refused outside development and test.
+ */
+let providerOverride: (GbpProvider & GbpWriteProvider) | null = null;
+
+export function setGbpProviderForTesting(
+  provider: (GbpProvider & GbpWriteProvider) | null,
+): void {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('The GBP provider cannot be overridden in production.');
+  }
+  providerOverride = provider;
 }
 
 /**
@@ -77,6 +142,6 @@ export class GoogleDirectProvider implements GbpProvider {
  * A vendor-backed implementation (Path B) would be selected here behind an env
  * flag without any service-layer change.
  */
-export function getGbpProvider(): GbpProvider {
-  return new GoogleDirectProvider();
+export function getGbpProvider(): GbpProvider & GbpWriteProvider {
+  return providerOverride ?? new GoogleDirectProvider();
 }

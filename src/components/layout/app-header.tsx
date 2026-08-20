@@ -30,6 +30,8 @@ export interface AppHeaderProps {
 const NAV_ITEMS = [
   { href: "dashboard", label: "Dashboard" },
   { href: "locations", label: "Locations" },
+  { href: "approvals", label: "Approvals" },
+  { href: "settings/connections", label: "Connections" },
   { href: "settings/members", label: "Members" },
 ] as const;
 

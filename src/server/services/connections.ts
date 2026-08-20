@@ -233,11 +233,29 @@ export async function getAccessToken(
 }
 
 /**
+ * Tombstone written over a revoked credential.
+ *
+ * Deliberately not valid ciphertext: any attempt to use it fails loudly at
+ * `openToken` rather than silently producing a token-shaped string.
+ */
+const REVOKED_TOKEN_TOMBSTONE = 'revoked.revoked.revoked.revoked';
+
+/**
  * Disconnects a Google account.
  *
- * Revokes the token at Google first, then destroys the local credential. The
- * local record is deleted even if revocation fails — leaving a decryptable
- * token behind because Google was unreachable would be the worse outcome.
+ * Revokes the token at Google, then destroys the local credential by
+ * overwriting it. The connection ROW IS RETAINED with status REVOKED, and the
+ * imported locations and their history are retained with it.
+ *
+ * This is not squeamishness about deletion. Deleting the connection would
+ * cascade through GbpAccount and Location into ChangeLog, and ChangeLog is
+ * append-only — so the delete is refused by the database the moment a customer
+ * has ever had a change applied. More importantly it SHOULD be refused: the
+ * record of what was changed on someone's business listing must not evaporate
+ * because they unplugged an integration.
+ *
+ * Purging a tenant's data is a separate, deliberate retention operation that
+ * archives the compliance trail first. It is not a side effect of disconnecting.
  */
 export async function disconnect(ctx: TenantContext, connectionId: string): Promise<void> {
   requireCapability(ctx, 'connection:manage');
@@ -259,6 +277,19 @@ export async function disconnect(ctx: TenantContext, connectionId: string): Prom
   accessTokenCache.delete(connectionId);
 
   await prisma.$transaction(async (tx) => {
+    // Destroy the credential in place. Retaining the row keeps the imported
+    // locations and their change history intact and referentially valid.
+    await tx.googleConnection.update({
+      where: { id: connectionId },
+      data: {
+        encryptedRefreshToken: REVOKED_TOKEN_TOMBSTONE,
+        encryptionKeyVersion: 0,
+        accessTokenExpiresAt: null,
+        status: ConnectionStatus.REVOKED,
+        lastError: null,
+      },
+    });
+
     await recordAuditEvent(
       {
         organizationId: ctx.organizationId,
@@ -270,9 +301,6 @@ export async function disconnect(ctx: TenantContext, connectionId: string): Prom
       },
       tx,
     );
-
-    // Cascades to GbpAccount and Location, and with them the imported profile data.
-    await tx.googleConnection.delete({ where: { id: connectionId } });
   });
 }
 

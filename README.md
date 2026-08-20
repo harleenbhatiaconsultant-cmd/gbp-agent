@@ -151,4 +151,39 @@ a fix on every audit run and make the client-facing history worthless.
 | 3 | Location import, immutable snapshots | done (needs API access approval) |
 | 5 | Audit rule engine, health score, findings | done |
 | 4 | BullMQ jobs and scheduling | not started — needs Redis |
-| 6 | Executors, policy engine, approval queue | not started — first write-capable phase |
+| 6 | Executors, policy engine, approval queue | done — write path built and tested, gate closed |
+
+## The change pipeline (Phase 6)
+
+Proposing a change runs it through the compliance guardrails before it becomes queueable. A
+BLOCKED change never becomes a ChangeRequest at all — the refusal is recorded permanently as a
+`PolicyViolation`, and no approval can override it.
+
+Guardrails, each a pure function with adversarial tests:
+
+| Guardrail | Blocks |
+|---|---|
+| Business name integrity | Names that add a city, a service keyword, or marketing language |
+| Fabrication guard | A model being the *source of a fact* — phone, address, hours, categories |
+| Ranking claims | Guarantees, "#1", "first page" in any published text |
+| Keyword stuffing | Repetition and density above natural prose |
+| Category integrity | Duplicate or malformed category sets |
+| Blast radius | More than N applied changes per location per day |
+
+Review gating and fake reviews are not blocked at runtime — they are **unrepresentable**. No
+action type exists that could request them, and a test asserts the enum stays that way.
+
+### Execution is gated twice
+
+```
+approve (named human)  ->  dry run (validateOnly=true)  ->  live write  ->  verify
+                                                   ^
+                                     stops here unless GBP_WRITE_MODE=live
+```
+
+Under the default configuration the pipeline **cannot reach a live profile even with valid
+credentials loaded**. That is asserted against the provider's actual call log in
+`tests/integration/change-pipeline.test.ts`, not inferred from a flag. A companion suite forces
+the gate open in isolation to prove the write path behind it is correct — dry run first, ChangeLog
+and status in one transaction, no double-apply on retry, and verification that catches a value
+Google did not persist.

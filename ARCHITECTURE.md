@@ -401,8 +401,12 @@ rejection-and-reapply cycle. **This is the critical path for the entire project.
   exact redirect-URI matching. Token exchange happens only in the server route handler.
 - Login OAuth and GBP-management OAuth are **separate consents**. Signing in must not silently grant
   profile-write access.
-- Disconnect revokes the token at Google and cascades: connection deleted, tokens destroyed, and the
-  org offered data export/deletion (Google API Services User Data Policy / Limited Use).
+- Disconnect revokes the authorization at Google and destroys the stored credential by overwriting
+  it, but **retains** the connection row, the imported locations and their change history. Deleting
+  them would cascade into `ChangeLog`, which is append-only and refuses it — and rightly so: the
+  record of what was changed on someone's listing must not disappear because an integration was
+  unplugged. Purging a tenant is a separate, deliberate retention operation that archives the
+  compliance trail first (Google API Services User Data Policy / Limited Use).
 
 **Tenant isolation**
 - Prisma tenant extension (§2) plus explicit `organizationId` predicates in services.
