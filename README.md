@@ -6,13 +6,19 @@ Google Business Profile management and local SEO optimization for businesses and
 - **[DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)** — phases, MVP scope, open decisions
 - **[docs/DEPLOYMENT_RAILWAY.md](docs/DEPLOYMENT_RAILWAY.md)** — deployment topology (not deployed yet)
 
-**Current state: Phases 0, 1, 2, 3 and 5 complete.** Tenancy and auth, the Google OAuth
-connection, location import with immutable snapshots, and the audit rule engine are all
-working end to end. Running an audit produces a real health score with an explainable
-breakdown.
+**Current state: Phases 0–6 complete.** Tenancy and auth, the Google connection, location
+import with immutable snapshots, the audit engine, the background job layer, and the full
+change pipeline — propose, policy, approve, dry run, execute, verify — are all built. Editors
+exist for categories, hours and address.
 
-Nothing is write-capable: no code path mutates a Google Business Profile. The executor
-registry, policy engine and approval queue are Phase 6.
+**The write path is built but gated shut.** Under the default configuration nothing can reach
+a live business profile even with valid credentials loaded: every write is sent to Google with
+`validateOnly=true`. That is asserted against the provider's actual call log, not inferred
+from a flag. See *Safety defaults* below.
+
+Two things are built but unverified against the real thing, both waiting on external access:
+the BullMQ round-trip (needs `REDIS_URL`) and the Google connect flow (needs approved
+Business Profile API access).
 
 Try it without Google credentials:
 
@@ -75,9 +81,10 @@ place. If it exits at startup, read the message — it names the variable.
 
 | Command | Purpose |
 |---|---|
-| `npm run dev` | Next.js dev server |
-| `npm run worker` | Worker process (idle until Phase 4) |
-| `npm run scheduler` | Scheduler process (idle until Phase 4) |
+| `npm run dev` | Dev server. Refuses to start if port 3000 is taken, rather than silently moving to 3001 |
+| `npm run dev:force` | Same, but stops whatever holds the port first |
+| `npm run worker` | Worker process. Idles unless REDIS_URL is set |
+| `npm run scheduler` | Scheduler process. Single replica only |
 | `npm run check` | typecheck + lint + tests — run before every commit |
 | `npm run test` | Vitest, against the test database |
 | `npm run db:migrate` | Create and apply a migration |
@@ -108,15 +115,34 @@ A component importing `@/server/integrations/*` fails lint.
 
 ## Safety defaults
 
-Two defaults matter more than the rest, and both are asserted by tests in
-`tests/unit/features.test.ts`:
+Two defaults matter more than the rest, both asserted by tests:
 
 - **`GBP_WRITE_MODE=validate_only`** — every Google write carries `validateOnly=true` and
   mutates nothing. Google offers no sandbox, so this is the only safe rehearsal. The env
   loader refuses `live` unless `NODE_ENV=production`.
 - **`ENABLE_AUTO_APPLY=false`** — unattended changes require three independent conditions:
   the global flag, per-organization opt-in for that specific action type, and a LOW risk
-  classification. Business name and category changes can never auto-apply at all.
+  classification.
+
+### Permanently human-approved actions
+
+`UPDATE_TITLE`, `UPDATE_CATEGORIES` and `UPDATE_ADDRESS` can **never** be auto-applied,
+whatever the flags say. These are settled decisions, not current defaults — the primary
+category is the strongest ranking signal a profile has, a bad address write can pull a listing
+into re-verification and offline, and name manipulation is an explicit Google policy violation.
+
+They are pinned by [`tests/unit/always-human-actions.test.ts`](tests/unit/always-human-actions.test.ts),
+which turns auto-apply **on** before asserting. That matters: with the flag off — the default,
+and how every other test runs — `canAutoApply` refuses everything at the first check, so a test
+there would pass even if the list were empty. The file also asserts a *non*-listed action IS
+allowed, so a mock that failed to take is caught rather than making the rest vacuous.
+
+### Separation of duties
+
+The proposer can never approve their own change. Absolute — no flag, no plan tier, no
+single-operator exemption, because an exception built for solo use outlives its usefulness. A
+one-person organization must invite a second admin; the UI says so and links to Members rather
+than showing a button that always fails. Rejecting your own proposal is still allowed.
 
 ## Append-only compliance tables
 
@@ -154,11 +180,22 @@ a fix on every audit run and make the client-facing history worthless.
 |---|---|---|
 | 0 | Foundation, schema, safety defaults | done |
 | 1 | Tenancy, auth, RBAC, invitations | done |
-| 2 | Google OAuth connection, encrypted tokens | done (needs credentials to test live) |
-| 3 | Location import, immutable snapshots | done (needs API access approval) |
+| 2 | Google OAuth connection, encrypted tokens | done — needs credentials to test against a real account |
+| 3 | Location import, immutable snapshots | done — needs approved API access to test |
+| 4 | BullMQ jobs, scheduling, quota governor | done — inactive until `REDIS_URL` is set |
 | 5 | Audit rule engine, health score, findings | done |
-| 4 | BullMQ jobs, scheduling, quota governor | done — inactive until REDIS_URL is set |
-| 6 | Executors, policy engine, approval queue | done — write path built and tested, gate closed |
+| 6 | Executors, policy engine, approval queue | done — write path built, gate closed |
+| — | Editors: categories, hours, address | done |
+| 7 | Reviews sync, AI response drafts | not started |
+| 8 | Performance metrics, dashboard | partial — dashboard exists, metrics import does not |
+| 9 | GBP posts | not started |
+| 10 | Local rank tracking (geo-grid) | not started — needs a paid provider |
+| 11 | Competitors, website audit | not started |
+| 12 | Client reports | not started |
+| 13–14 | White-label, billing | not started |
+
+**Blocked on external access, not on code:** the BullMQ round-trip (needs `REDIS_URL`) and
+anything that talks to a real profile (needs the Business Profile API access request approved).
 
 ## The change pipeline (Phase 6)
 
@@ -237,3 +274,19 @@ correct for a single instance.
 > Redis to run against. Everything around it is tested (job identity, schedules, quota, handlers,
 > authority, JobRun bookkeeping, graceful degradation). The first thing to do when `REDIS_URL`
 > arrives is start the worker and scheduler and watch a real job flow through.
+
+## Editors
+
+Three editors propose changes into the approval queue. Each is shaped by the specific way its
+field can go wrong.
+
+| Editor | The failure mode it is built around |
+|---|---|
+| **Categories** | Ids are not free text — Google rejects anything outside its regional, localized taxonomy. So it searches Google and you pick, rather than typing a `gcid:` and hoping. Falls back to manual id entry when the taxonomy is unreachable, saying why. |
+| **Hours** | The update mask replaces `regularHours` wholesale, so a day left out is not "unchanged" — it is **closed**. Seeded from published hours, every day always shown, and closing a currently-open day is called out before submission. Split shifts survive; collapsing them would discard half a restaurant's schedule. |
+| **Address** | A bad write triggers re-verification and can take the listing offline. Shows a field-by-field diff before submission, and warns specifically on the two changes most likely to force re-verification: moving country, and adding an address to a service-area profile. |
+
+All three seed from the **snapshot**, never the denormalized `Location` row. The policy engine
+compares proposals against the snapshot, so an editor seeded from anything else could show a
+state differing from the one the guardrails reason about — and its warnings would be wrong in
+exactly the case that matters.
