@@ -48,8 +48,15 @@ This machine already has a portable Postgres 16 at `C:\Users\HP\pgportable`, dat
 C:/Users/HP/pgportable/pgsql/bin/pg_ctl -D C:/Users/HP/pgdata -l C:/Users/HP/pg-server.log start
 ```
 
-Keep the log file **outside** the data directory — Postgres fsyncs the data directory on
-startup and will stall for 30 seconds retrying a log file it cannot open there.
+Two things that will bite you otherwise:
+
+- Keep the log file **outside** the data directory. Postgres fsyncs the data directory on
+  startup and will stall for 30 seconds retrying a log file it cannot open there.
+- **Start it detached, not from a shell you are about to close.** The postmaster is a child of
+  whatever launched it, so starting it from an attached or background shell means the server
+  dies when that shell is torn down — which looks like a mysterious "connection refused" later.
+  On Windows, `Start-Process -WindowStyle Hidden` on `pg_ctl` is the reliable way; installing it
+  as a Windows service is the permanent fix.
 
 ## Setup
 
