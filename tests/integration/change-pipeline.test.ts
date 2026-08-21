@@ -43,10 +43,13 @@ import { healthyLocation } from '../fixtures/locations';
 
 const ORG_ID = 'org_change_pipeline';
 const OWNER_ID = 'user_change_owner';
+/** A second admin. Separation of duties means the proposer can never approve. */
+const APPROVER_ID = 'user_change_approver';
 const EDITOR_ID = 'user_change_editor';
 const CONNECTION_ID = 'conn_change_pipeline';
 
 let ownerCtx: TenantContext;
+let approverCtx: TenantContext;
 let editorCtx: TenantContext;
 let locationId: string;
 let provider: FakeGbpProvider;
@@ -76,6 +79,7 @@ beforeAll(async () => {
 
   for (const [id, email, role] of [
     [OWNER_ID, 'owner@pipeline.test', MemberRole.OWNER],
+    [APPROVER_ID, 'approver@pipeline.test', MemberRole.ADMIN],
     [EDITOR_ID, 'editor@pipeline.test', MemberRole.EDITOR],
   ] as const) {
     await prisma.user.upsert({ where: { id }, update: {}, create: { id, email } });
@@ -126,6 +130,7 @@ beforeAll(async () => {
   });
 
   ownerCtx = makeCtx(OWNER_ID, MemberRole.OWNER);
+  approverCtx = makeCtx(APPROVER_ID, MemberRole.ADMIN);
   editorCtx = makeCtx(EDITOR_ID, MemberRole.EDITOR);
 
   provider = new FakeGbpProvider(healthyLocation);
@@ -236,6 +241,33 @@ describe('proposal and approval', () => {
     expect(provider.updates).toHaveLength(0);
   });
 
+  it('refuses the proposer approving their own change, even as OWNER', async () => {
+    // Separation of duties is absolute — there is no single-operator exemption.
+    const { changeRequestId } = await proposeChange(ownerCtx, {
+      locationId,
+      actionType: ActionType.UPDATE_WEBSITE,
+      payload: { websiteUri: 'https://example.test/self-approve', sourceRef: humanSource },
+    });
+
+    await expect(approveChange(ownerCtx, changeRequestId)).rejects.toBeInstanceOf(ForbiddenError);
+
+    const request = await prisma.changeRequest.findUniqueOrThrow({ where: { id: changeRequestId } });
+    expect(request.status).toBe(ChangeRequestStatus.PENDING_APPROVAL);
+    expect(request.approvedByUserId).toBeNull();
+  });
+
+  it('still lets the proposer reject their own change', async () => {
+    // Rejecting moves in the safe direction; requiring a second person to
+    // decline an obvious mistake would only train people to rubber-stamp.
+    const { changeRequestId } = await proposeChange(ownerCtx, {
+      locationId,
+      actionType: ActionType.UPDATE_WEBSITE,
+      payload: { websiteUri: 'https://example.test/self-reject', sourceRef: humanSource },
+    });
+
+    await expect(rejectChange(ownerCtx, changeRequestId, 'Changed my mind')).resolves.toBeUndefined();
+  });
+
   it('refuses approval from an EDITOR', async () => {
     const { changeRequestId } = await proposeChange(ownerCtx, {
       locationId,
@@ -253,11 +285,11 @@ describe('proposal and approval', () => {
       payload: { websiteUri: 'https://example.test/c', sourceRef: humanSource },
     });
 
-    await approveChange(ownerCtx, changeRequestId);
+    await approveChange(approverCtx, changeRequestId);
 
     const request = await prisma.changeRequest.findUniqueOrThrow({ where: { id: changeRequestId } });
     expect(request.status).toBe(ChangeRequestStatus.APPROVED);
-    expect(request.approvedByUserId).toBe(OWNER_ID);
+    expect(request.approvedByUserId).toBe(APPROVER_ID);
     expect(request.approvedAt).toBeInstanceOf(Date);
   });
 
@@ -284,7 +316,7 @@ describe('execution under validate_only', () => {
       actionType: ActionType.UPDATE_WEBSITE,
       payload: { websiteUri, sourceRef: humanSource },
     });
-    await approveChange(ownerCtx, changeRequestId);
+    await approveChange(approverCtx, changeRequestId);
     return changeRequestId;
   }
 
@@ -354,7 +386,7 @@ describe('when Google rejects the change', () => {
       actionType: ActionType.UPDATE_WEBSITE,
       payload: { websiteUri: 'https://example.test/rejected', sourceRef: humanSource },
     });
-    await approveChange(ownerCtx, changeRequestId);
+    await approveChange(approverCtx, changeRequestId);
 
     provider.failNextUpdateWith = new GbpValidationError('Invalid website URI for this location');
 

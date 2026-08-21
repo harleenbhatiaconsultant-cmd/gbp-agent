@@ -17,7 +17,9 @@ import { acquireRequestSlot, acquireEditSlot } from '@/server/integrations/googl
 import {
   LOCATION_READ_MASK,
   type GbpAccountResource,
+  type GbpCategoryResource,
   type GbpListAccountsResponse,
+  type GbpListCategoriesResponse,
   type GbpListLocationsResponse,
   type GbpLocationResource,
 } from '@/server/integrations/google/types';
@@ -76,6 +78,38 @@ export class GoogleDirectProvider implements GbpProvider, GbpWriteProvider {
         logContext: { ...ctx.logContext, op: 'getLocation', locationName },
       },
     );
+  }
+
+  /**
+   * Searches Google's category taxonomy.
+   *
+   * `filter` uses Google's own syntax; `displayName=` performs a prefix/substring
+   * match rather than an exact one, which is what makes it usable as a search
+   * box. The result set is capped because this backs a type-ahead and nobody
+   * scrolls past twenty categories.
+   */
+  async searchCategories(
+    ctx: GbpProviderContext,
+    params: { query: string; regionCode: string; languageCode?: string; limit?: number },
+  ): Promise<GbpCategoryResource[]> {
+    await acquireRequestSlot(ctx.connectionId ?? 'unknown');
+
+    const response = await googleRequest<GbpListCategoriesResponse>(
+      `${GOOGLE_API_HOSTS.businessInformation}/v1/categories`,
+      {
+        accessToken: ctx.accessToken,
+        query: {
+          regionCode: params.regionCode,
+          languageCode: params.languageCode ?? 'en',
+          view: 'BASIC',
+          filter: `displayName=${params.query}`,
+          pageSize: Math.min(params.limit ?? 20, 100),
+        },
+        logContext: { ...ctx.logContext, op: 'searchCategories', regionCode: params.regionCode },
+      },
+    );
+
+    return response.categories ?? [];
   }
 
   /**

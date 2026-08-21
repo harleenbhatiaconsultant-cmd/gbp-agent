@@ -44,6 +44,7 @@ import { canAutoApply, getWriteMode, isDryRun } from '@/config/features';
 import { getExecutor } from '@/server/actions/registry';
 import { evaluatePolicy } from '@/server/policy/engine';
 import type { PolicyResult } from '@/server/policy/types';
+import { assertSeparationOfDuties } from '@/server/policy/separation-of-duties';
 import { getGbpProvider } from '@/server/integrations/google/direct-provider';
 import { isGbpError } from '@/server/integrations/google/errors';
 import type { GbpLocationResource } from '@/server/integrations/google/types';
@@ -294,14 +295,10 @@ export async function approveChange(ctx: TenantContext, changeRequestId: string)
     );
   }
 
-  if (request.requestedByUserId && request.requestedByUserId === approver.userId) {
-    // Not blocked outright — in a small team the proposer is often the only
-    // admin — but it is recorded, so four-eyes can be audited later.
-    childLogger({ organizationId: ctx.organizationId, changeRequestId }).info(
-      { userId: approver.userId },
-      'Change approved by its own proposer',
-    );
-  }
+  // Absolute: the proposer may never approve their own change, including in a
+  // single-operator organization. See separation-of-duties.ts for why there is
+  // no exemption.
+  assertSeparationOfDuties(request, approver);
 
   await prisma.$transaction(async (tx) => {
     await tx.changeRequest.update({
@@ -599,6 +596,10 @@ export async function executeChange(
           locationId: request.locationId,
           changeRequestId,
           actor: request.requestedByUserId ? ChangeActor.USER : ChangeActor.SYSTEM,
+          // Attributed to whoever AUTHORIZED the change. Separation of duties
+          // guarantees that is never the proposer, and the proposer is
+          // recoverable from the linked ChangeRequest, so the two-person trail
+          // survives while the log answers "who let this happen".
           actorUserId: request.approvedByUserId ?? request.requestedByUserId,
           actionType: request.actionType,
           summary: executor.describe(payload, currentProfile),
@@ -673,20 +674,46 @@ export async function executeChange(
  */
 function authorizeExecution(
   ctx: TenantContext,
-  request: { approvedByUserId: string | null; status: ChangeRequestStatus },
+  request: {
+    approvedByUserId: string | null;
+    status: ChangeRequestStatus;
+    policyDecision: Prisma.JsonValue | null;
+  },
 ): void {
   if (isUserContext(ctx)) {
     requireCapability(ctx, 'change:execute');
     return;
   }
 
-  if (!request.approvedByUserId) {
-    throw new ForbiddenError(
-      'A background job cannot execute a change that no person approved. ' +
-        'System contexts carry out approved work; they do not authorize it.',
-      { changeStatus: request.status },
-    );
+  // A background job may carry out work authorized in one of exactly two ways.
+  if (request.approvedByUserId) return;
+
+  // Or by auto-apply, which is authorization of a different shape: no person
+  // approved this specific change, but a person opted this organization into
+  // auto-applying this specific action type, and the policy engine confirmed it
+  // was LOW risk and clean. Without this branch ENABLE_AUTO_APPLY would be a
+  // silent no-op in the background — the only place it is meant to operate.
+  if (wasAutoApproved(request.policyDecision)) return;
+
+  throw new ForbiddenError(
+    'A background job cannot execute a change that was neither approved by a person nor ' +
+      'auto-applied under an explicit organization opt-in. System contexts carry out ' +
+      'authorized work; they do not authorize it.',
+    { changeStatus: request.status },
+  );
+}
+
+/**
+ * Reads the auto-apply decision recorded on the request at proposal time.
+ * Exported so the enqueue guard applies exactly the same rule as execution.
+ */
+export function wasAutoApproved(policyDecision: Prisma.JsonValue | null): boolean {
+  if (!policyDecision || typeof policyDecision !== 'object' || Array.isArray(policyDecision)) {
+    return false;
   }
+  const autoApply = (policyDecision as Record<string, unknown>).autoApply;
+  if (!autoApply || typeof autoApply !== 'object') return false;
+  return (autoApply as Record<string, unknown>).allowed === true;
 }
 
 function describeFailure(error: unknown): { code: string; message: string } {

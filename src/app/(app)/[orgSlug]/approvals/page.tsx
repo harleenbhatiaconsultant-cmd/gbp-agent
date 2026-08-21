@@ -8,6 +8,7 @@ import { getWriteModeSummary } from "@/server/services/write-mode";
 import { enqueueChangeExecution } from "@/server/jobs/handlers";
 import { isQueueingAvailable } from "@/server/jobs/redis";
 import { can, requireCapability } from "@/server/auth/rbac";
+import { canApprove as passesSeparationOfDuties } from "@/server/policy/separation-of-duties";
 import { isAppError } from "@/server/errors";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -220,26 +221,44 @@ export default async function ApprovalsPage({
                 </details>
 
                 {canApprove ? (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <form action={approveAction}>
-                      <input type="hidden" name="orgSlug" value={orgSlug} />
-                      <input type="hidden" name="changeRequestId" value={request.id} />
-                      <Button type="submit" size="sm">
-                        Approve
-                      </Button>
-                    </form>
-                    <form action={rejectAction} className="flex items-center gap-2">
-                      <input type="hidden" name="orgSlug" value={orgSlug} />
-                      <input type="hidden" name="changeRequestId" value={request.id} />
-                      <input
-                        name="reason"
-                        placeholder="Reason (optional)"
-                        className="border-input bg-background h-8 w-56 rounded-md border px-2 text-xs"
-                      />
-                      <Button type="submit" size="sm" variant="ghost">
-                        Reject
-                      </Button>
-                    </form>
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {/* Rejecting your own proposal is always allowed — it moves
+                          in the safe direction. Approving it never is. */}
+                      {passesSeparationOfDuties(request, { userId: ctx.userId ?? "" }) ? (
+                        <form action={approveAction}>
+                          <input type="hidden" name="orgSlug" value={orgSlug} />
+                          <input type="hidden" name="changeRequestId" value={request.id} />
+                          <Button type="submit" size="sm">
+                            Approve
+                          </Button>
+                        </form>
+                      ) : null}
+
+                      <form action={rejectAction} className="flex items-center gap-2">
+                        <input type="hidden" name="orgSlug" value={orgSlug} />
+                        <input type="hidden" name="changeRequestId" value={request.id} />
+                        <input
+                          name="reason"
+                          placeholder="Reason (optional)"
+                          className="border-input bg-background h-8 w-56 rounded-md border px-2 text-xs"
+                        />
+                        <Button type="submit" size="sm" variant="ghost">
+                          Reject
+                        </Button>
+                      </form>
+                    </div>
+
+                    {!passesSeparationOfDuties(request, { userId: ctx.userId ?? "" }) ? (
+                      <p className="text-muted-foreground text-xs">
+                        You proposed this change, so someone else has to approve it. If you are
+                        the only owner or admin here, invite another one from{" "}
+                        <Link href={`/${orgSlug}/settings/members`} className="underline">
+                          Members
+                        </Link>
+                        .
+                      </p>
+                    ) : null}
                   </div>
                 ) : (
                   <p className="text-muted-foreground text-xs">

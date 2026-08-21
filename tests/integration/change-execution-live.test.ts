@@ -47,9 +47,12 @@ import { healthyLocation } from '../fixtures/locations';
 
 const ORG_ID = 'org_live_write';
 const OWNER_ID = 'user_live_owner';
+/** Separation of duties: the proposer can never approve, so approvals need a second admin. */
+const APPROVER_ID = 'user_live_approver';
 const CONNECTION_ID = 'conn_live_write';
 
 let ctx: TenantContext;
+let approverCtx: TenantContext;
 let locationId: string;
 let provider: FakeGbpProvider;
 
@@ -69,16 +72,17 @@ beforeAll(async () => {
     update: {},
     create: { id: ORG_ID, name: 'Live Write', slug: 'live-write' },
   });
-  await prisma.user.upsert({
-    where: { id: OWNER_ID },
-    update: {},
-    create: { id: OWNER_ID, email: 'owner@livewrite.test' },
-  });
-  await prisma.membership.upsert({
-    where: { userId_organizationId: { userId: OWNER_ID, organizationId: ORG_ID } },
-    update: { role: MemberRole.OWNER },
-    create: { userId: OWNER_ID, organizationId: ORG_ID, role: MemberRole.OWNER },
-  });
+  for (const [id, email, role] of [
+    [OWNER_ID, 'owner@livewrite.test', MemberRole.OWNER],
+    [APPROVER_ID, 'approver@livewrite.test', MemberRole.ADMIN],
+  ] as const) {
+    await prisma.user.upsert({ where: { id }, update: {}, create: { id, email } });
+    await prisma.membership.upsert({
+      where: { userId_organizationId: { userId: id, organizationId: ORG_ID } },
+      update: { role },
+      create: { userId: id, organizationId: ORG_ID, role },
+    });
+  }
 
   await prisma.googleConnection.upsert({
     where: { id: CONNECTION_ID },
@@ -115,6 +119,8 @@ beforeAll(async () => {
     isElevated: false,
     db: tenantDb(ORG_ID),
   };
+
+  approverCtx = { ...ctx, userId: APPROVER_ID, role: MemberRole.ADMIN };
 
   provider = new FakeGbpProvider(healthyLocation);
   setGbpProviderForTesting(provider);
@@ -171,7 +177,7 @@ async function approvedWebsiteChange(websiteUri: string): Promise<string> {
     actionType: ActionType.UPDATE_WEBSITE,
     payload: { websiteUri, sourceRef: humanSource },
   });
-  await approveChange(ctx, changeRequestId);
+  await approveChange(approverCtx, changeRequestId);
   return changeRequestId;
 }
 
@@ -207,7 +213,16 @@ describe('live execution', () => {
     expect(entry.summary).toMatch(/website/i);
     expect(entry.beforeState).toMatchObject({ websiteUri: healthyLocation.websiteUri });
     expect(entry.afterState).toMatchObject({ websiteUri: 'https://example.test/live-3' });
-    expect(entry.actorUserId).toBe(OWNER_ID);
+
+    // Attribution is to whoever AUTHORIZED the mutation — the approver, not the
+    // proposer. Who proposed it is on the linked ChangeRequest, so the full
+    // two-person trail is recoverable; the log answers "who let this happen".
+    expect(entry.actorUserId).toBe(APPROVER_ID);
+    expect(entry.changeRequestId).toBe(id);
+
+    const request = await prisma.changeRequest.findUniqueOrThrow({ where: { id } });
+    expect(request.requestedByUserId).toBe(OWNER_ID);
+    expect(request.approvedByUserId).toBe(APPROVER_ID);
   });
 
   it('does not double-apply on a retry', async () => {
@@ -274,7 +289,7 @@ describe('verification', () => {
       actionType: ActionType.UPDATE_WEBSITE,
       payload: { websiteUri: 'https://example.test/never-applied', sourceRef: humanSource },
     });
-    await approveChange(ctx, changeRequestId);
+    await approveChange(approverCtx, changeRequestId);
 
     // Not executed: there is no live execution to verify against.
     await expect(verifyChange(ctx, changeRequestId)).rejects.toThrowError(/no successful live execution/i);

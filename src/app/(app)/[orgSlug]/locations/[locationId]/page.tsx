@@ -9,6 +9,8 @@ import { proposeChange, getChangeLog } from "@/server/services/changes";
 import { can } from "@/server/auth/rbac";
 import { isAppError } from "@/server/errors";
 import { ProposeFix, isProposable } from "@/components/features/propose-fix";
+import { CategoryEditor, type CategoryOption } from "@/components/features/category-editor";
+import { searchCategories, type CategorySearchResult } from "@/server/services/categories";
 import type { HealthScore as HealthScoreShape } from "@/server/audit/scoring";
 import { HealthScore } from "@/components/features/health-score";
 import { FindingsList } from "@/components/features/findings-list";
@@ -18,6 +20,19 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 export const dynamic = "force-dynamic";
+
+/** Projects the stored secondaryCategories JSON onto the editor's shape. */
+function toCategoryOptions(value: unknown): CategoryOption[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") return null;
+      const category = entry as { name?: string; displayName?: string };
+      if (!category.name) return null;
+      return { id: category.name, displayName: category.displayName ?? category.name };
+    })
+    .filter((option): option is CategoryOption => option !== null);
+}
 
 async function runAuditAction(formData: FormData) {
   "use server";
@@ -76,6 +91,71 @@ async function proposeFixAction(formData: FormData) {
         result.deduplicated
           ? "An identical proposal was already queued."
           : "Proposed. It is waiting in the approval queue.",
+      )}`,
+    );
+  } catch (error) {
+    if (isAppError(error)) {
+      redirect(
+        `${path}?error=${encodeURIComponent(
+          error.expose ? error.message : "Could not propose this change.",
+        )}`,
+      );
+    }
+    throw error;
+  }
+}
+
+/**
+ * Server action backing the category editor's type-ahead.
+ *
+ * `orgSlug` is bound at render time rather than sent from the client: a server
+ * action is its own entry point, so it must resolve and authorize its own
+ * tenant context rather than trusting an argument the browser supplies.
+ */
+async function searchCategoriesAction(
+  orgSlug: string,
+  locationId: string,
+  query: string,
+): Promise<CategorySearchResult> {
+  "use server";
+  const ctx = await resolveTenantContext(orgSlug);
+  return searchCategories(ctx, locationId, query);
+}
+
+async function proposeCategoriesAction(formData: FormData) {
+  "use server";
+  const orgSlug = String(formData.get("orgSlug"));
+  const locationId = String(formData.get("locationId"));
+  const path = `/${orgSlug}/locations/${locationId}`;
+
+  const additional = String(formData.get("additionalCategoryIds") ?? "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+
+  const payload = {
+    primaryCategoryId: String(formData.get("primaryCategoryId") ?? "").trim(),
+    primaryCategoryName: String(formData.get("primaryCategoryName") ?? "").trim() || undefined,
+    additionalCategoryIds: additional,
+    sourceRef: {
+      kind: String(formData.get("sourceKind") ?? "USER_INPUT"),
+      detail: String(formData.get("sourceDetail") ?? "").trim(),
+    },
+  };
+
+  try {
+    const ctx = await resolveTenantContext(orgSlug);
+    const result = await proposeChange(ctx, {
+      locationId,
+      actionType: ActionType.UPDATE_CATEGORIES,
+      payload,
+    });
+    revalidatePath(path);
+    redirect(
+      `${path}?proposed=${encodeURIComponent(
+        result.deduplicated
+          ? "An identical proposal was already queued."
+          : "Proposed. Category changes always need a human approver.",
       )}`,
     );
   } catch (error) {
@@ -272,6 +352,36 @@ export default async function LocationDetailPage({
           </section>
         </>
       )}
+
+      {canDraft ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Categories</CardTitle>
+            <CardDescription>
+              The primary category is the strongest single ranking signal a profile has, and the
+              wrong one is the most damaging non-fatal error. Pick from Google&apos;s taxonomy
+              rather than guessing an id.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <CategoryEditor
+              orgSlug={orgSlug}
+              locationId={locationId}
+              currentPrimary={
+                location.primaryCategoryId
+                  ? {
+                      id: location.primaryCategoryId,
+                      displayName: location.primaryCategoryName ?? location.primaryCategoryId,
+                    }
+                  : null
+              }
+              currentSecondary={toCategoryOptions(location.secondaryCategories)}
+              searchAction={searchCategoriesAction.bind(null, orgSlug)}
+              submitAction={proposeCategoriesAction}
+            />
+          </CardContent>
+        </Card>
+      ) : null}
 
       {canDraft && fixableFindings.length > 0 ? (
         <Card>

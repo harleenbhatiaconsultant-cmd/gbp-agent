@@ -128,6 +128,27 @@ export const LOCATION_READ_MASK = [
   'serviceItems',
 ].join(',');
 
+/**
+ * A category from Google's own taxonomy.
+ *
+ * Category IDs (`gcid:dentist`) are not free text — Google rejects anything not
+ * in its list, and the list is regional and localized. That is why the editor
+ * searches Google rather than letting someone type an id and hope.
+ */
+export interface GbpCategoryResource {
+  /** e.g. "gcid:dentist" */
+  name: string;
+  displayName?: string;
+  serviceTypes?: Array<{ serviceTypeId?: string; displayName?: string }>;
+  moreHoursTypes?: unknown[];
+}
+
+export interface GbpListCategoriesResponse {
+  categories?: GbpCategoryResource[];
+  nextPageToken?: string;
+  totalCategoryCount?: number;
+}
+
 export interface GbpListAccountsResponse {
   accounts?: GbpAccountResource[];
   nextPageToken?: string;

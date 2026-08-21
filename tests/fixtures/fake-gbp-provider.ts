@@ -16,6 +16,7 @@ import type {
 } from '@/server/integrations/google/provider';
 import type {
   GbpAccountResource,
+  GbpCategoryResource,
   GbpLocationResource,
 } from '@/server/integrations/google/types';
 
@@ -31,9 +32,22 @@ export class FakeGbpProvider implements GbpProvider, GbpWriteProvider {
 
   readonly updates: RecordedUpdate[] = [];
   readonly reads: string[] = [];
+  readonly categorySearches: string[] = [];
+
+  /** Stand-in taxonomy for category-editor tests. */
+  categories: GbpCategoryResource[] = [
+    { name: 'gcid:dentist', displayName: 'Dentist' },
+    { name: 'gcid:dental_clinic', displayName: 'Dental clinic' },
+    { name: 'gcid:cosmetic_dentist', displayName: 'Cosmetic dentist' },
+    { name: 'gcid:orthodontist', displayName: 'Orthodontist' },
+    { name: 'gcid:plumber', displayName: 'Plumber' },
+  ];
 
   /** Set to make the next updateLocation reject, simulating a Google refusal. */
   failNextUpdateWith: Error | null = null;
+
+  /** Set to make the next searchCategories reject. */
+  failNextSearchWith: Error | null = null;
 
   constructor(
     private profile: GbpLocationResource,
@@ -59,6 +73,26 @@ export class FakeGbpProvider implements GbpProvider, GbpWriteProvider {
 
   async listLocations(): Promise<GbpLocationResource[]> {
     return [this.profile];
+  }
+
+  /** Substring match over `categories`, standing in for Google's taxonomy. */
+  async searchCategories(
+    _ctx: GbpProviderContext,
+    params: { query: string },
+  ): Promise<GbpCategoryResource[]> {
+    if (this.failNextSearchWith) {
+      const error = this.failNextSearchWith;
+      this.failNextSearchWith = null;
+      throw error;
+    }
+
+    this.categorySearches.push(params.query);
+    const needle = params.query.toLowerCase();
+    return this.categories.filter(
+      (category) =>
+        category.displayName?.toLowerCase().includes(needle) ||
+        category.name.toLowerCase().includes(needle),
+    );
   }
 
   async getLocation(_ctx: GbpProviderContext, locationName: string): Promise<GbpLocationResource> {
@@ -98,6 +132,8 @@ export class FakeGbpProvider implements GbpProvider, GbpWriteProvider {
   reset(): void {
     this.updates.length = 0;
     this.reads.length = 0;
+    this.categorySearches.length = 0;
     this.failNextUpdateWith = null;
+    this.failNextSearchWith = null;
   }
 }

@@ -17,7 +17,7 @@ import { prisma } from '@/server/db';
 import { loadSystemContext } from '@/server/auth/system-context';
 import { syncConnection, syncLocation } from '@/server/services/locations';
 import { runLocationAudit } from '@/server/services/audits';
-import { executeChange, verifyChange } from '@/server/services/changes';
+import { executeChange, verifyChange, wasAutoApproved } from '@/server/services/changes';
 import { getAccessToken } from '@/server/services/connections';
 import { enqueue } from '@/server/jobs/queues';
 import { bucket, jobId } from '@/server/jobs/types';
@@ -148,8 +148,9 @@ export async function handleAuditLocation(data: {
 /**
  * Carries out an approved change.
  *
- * The job presents no authority of its own: `executeChange` checks that a named
- * human approved the request before it will act on a system context.
+ * The job presents no authority of its own: `executeChange` checks that the
+ * request was authorized either by a named human approver or by an explicit
+ * auto-apply opt-in, before it will act on a system context.
  */
 export async function handleExecuteChange(data: {
   organizationId: string;
@@ -295,7 +296,7 @@ export async function enqueueChangeExecution(
 ): Promise<{ enqueued: boolean; reason?: string }> {
   const request = await prisma.changeRequest.findFirst({
     where: { id: changeRequestId, organizationId },
-    select: { status: true, approvedByUserId: true },
+    select: { status: true, approvedByUserId: true, policyDecision: true },
   });
 
   if (!request) return { enqueued: false, reason: 'Change request not found.' };
@@ -304,8 +305,13 @@ export async function enqueueChangeExecution(
     return { enqueued: false, reason: `Change is ${request.status}, not APPROVED.` };
   }
 
-  if (!request.approvedByUserId) {
-    return { enqueued: false, reason: 'Change has no recorded approver.' };
+  // Mirrors authorizeExecution: a job may carry out work authorized either by a
+  // named person or by an explicit auto-apply opt-in, and nothing else.
+  if (!request.approvedByUserId && !wasAutoApproved(request.policyDecision)) {
+    return {
+      enqueued: false,
+      reason: 'Change has no recorded approver and was not auto-applied under an opt-in.',
+    };
   }
 
   return enqueue(

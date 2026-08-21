@@ -18,6 +18,7 @@
 
 import type {
   GbpAccountResource,
+  GbpCategoryResource,
   GbpLocationResource,
 } from '@/server/integrations/google/types';
 
@@ -44,6 +45,18 @@ export interface GbpProvider {
 
   /** One location. `locationName` is "locations/456". */
   getLocation(ctx: GbpProviderContext, locationName: string): Promise<GbpLocationResource>;
+
+  /**
+   * Searches Google's category taxonomy.
+   *
+   * Categories are regional and localized, and Google rejects any id outside
+   * its own list — so a category cannot be typed by hand with any confidence.
+   * This is what backs the category editor.
+   */
+  searchCategories(
+    ctx: GbpProviderContext,
+    params: { query: string; regionCode: string; languageCode?: string; limit?: number },
+  ): Promise<GbpCategoryResource[]>;
 }
 
 /**
