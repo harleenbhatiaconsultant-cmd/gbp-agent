@@ -188,23 +188,45 @@ export type ServerEnv = z.infer<typeof envSchema>;
 // Parse once, fail fast
 // ---------------------------------------------------------------------------
 
-function parseEnv(): ServerEnv {
-  const result = envSchema.safeParse(process.env);
+/** URLs whose localhost defaults are development conveniences, not valid production values. */
+const LOCALHOST_SENSITIVE_KEYS = [
+  'APP_URL',
+  'NEXT_PUBLIC_APP_URL',
+  'AUTH_URL',
+  'GOOGLE_OAUTH_REDIRECT_URI',
+] as const satisfies readonly (keyof ServerEnv)[];
 
-  if (!result.success) {
-    const issues = result.error.issues
-      .map((i) => `  - ${i.path.join('.') || '(root)'}: ${i.message}`)
-      .join('\n');
-    throw new Error(
-      `Invalid server environment configuration:\n${issues}\n\n` +
-        'Copy .env.example to .env and fill in the required values.',
-    );
+/**
+ * True during `next build`.
+ *
+ * The build runs with NODE_ENV=production and imports server modules to collect
+ * page data, but it is NOT the running server — a developer building locally
+ * has localhost in .env perfectly legitimately, and the deploy pipeline builds
+ * before the real environment variables are attached. Enforcing runtime URL
+ * requirements here would fail every local production build and most CI ones.
+ *
+ * Found by running the build: the first version of this check broke it.
+ */
+function isBuildPhase(): boolean {
+  return process.env.NEXT_PHASE === 'phase-production-build';
+}
+
+function pointsAtLocalhost(value: string): boolean {
+  try {
+    // URL keeps IPv6 hosts bracketed ("[::1]"), so strip them before comparing
+    // or the loopback address slips straight through this check.
+    const host = new URL(value).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0';
+  } catch {
+    return false;
   }
+}
 
-  const parsed = result.data;
-
-  // ---- Cross-field safety invariants ------------------------------------
-
+/**
+ * Cross-field invariants, exported so each one is testable on its own rather
+ * than only reachable by importing the module under a contrived environment.
+ */
+export function assertEnvironmentInvariants(parsed: ServerEnv): void {
   // Live writes mutate real customer business profiles. Google has no sandbox,
   // so this guard makes it impossible to point a dev or test process at live mode.
   if (parsed.GBP_WRITE_MODE === 'live' && parsed.NODE_ENV !== 'production') {
@@ -222,6 +244,49 @@ function parseEnv(): ServerEnv {
     );
   }
 
+  /**
+   * The localhost defaults above exist so a fresh clone runs without ceremony.
+   * In production they are actively harmful: an unset GOOGLE_OAUTH_REDIRECT_URI
+   * would silently fall back to localhost and produce a `redirect_uri_mismatch`
+   * from Google at the end of a user's sign-in, and an unset APP_URL would put
+   * localhost links into anything the platform sends out.
+   *
+   * That is exactly the "confusing runtime error hours later" this module exists
+   * to prevent, so a default that is fine in development becomes a boot failure
+   * in production rather than a silent one.
+   */
+  if (parsed.NODE_ENV === 'production' && !isBuildPhase()) {
+    const offenders = LOCALHOST_SENSITIVE_KEYS.filter((key) =>
+      pointsAtLocalhost(String(parsed[key])),
+    );
+
+    if (offenders.length > 0) {
+      throw new Error(
+        `These must be set to real URLs when NODE_ENV=production, but still point at localhost:\n` +
+          offenders.map((key) => `  - ${key}=${String(parsed[key])}`).join('\n') +
+          '\n\nThe localhost values are development defaults. Left unset in production they fail ' +
+          'later and confusingly — a redirect_uri_mismatch at the end of sign-in, or localhost ' +
+          'links in outbound content — rather than here at boot.',
+      );
+    }
+  }
+}
+
+function parseEnv(): ServerEnv {
+  const result = envSchema.safeParse(process.env);
+
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((i) => `  - ${i.path.join('.') || '(root)'}: ${i.message}`)
+      .join('\n');
+    throw new Error(
+      `Invalid server environment configuration:\n${issues}\n\n` +
+        'Copy .env.example to .env and fill in the required values.',
+    );
+  }
+
+  const parsed = result.data;
+  assertEnvironmentInvariants(parsed);
   return parsed;
 }
 

@@ -123,6 +123,13 @@ Two defaults matter more than the rest, both asserted by tests:
   the global flag, per-organization opt-in for that specific action type, and a LOW risk
   classification.
 
+`APP_URL`, `NEXT_PUBLIC_APP_URL`, `AUTH_URL` and `GOOGLE_OAUTH_REDIRECT_URI` default to
+localhost so a fresh clone runs without ceremony, but a **running** production process refuses
+to boot while they still point there. Left unset in production they would otherwise fail late
+and confusingly — a `redirect_uri_mismatch` at the end of a user's sign-in, or localhost links
+in outbound content. The check is skipped during `next build`, which runs as production but is
+not the server.
+
 ### Permanently human-approved actions
 
 `UPDATE_TITLE`, `UPDATE_CATEGORIES` and `UPDATE_ADDRESS` can **never** be auto-applied,
