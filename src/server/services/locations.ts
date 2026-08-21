@@ -362,6 +362,31 @@ export async function getLocation(ctx: TenantContext, locationId: string) {
   return location;
 }
 
+/**
+ * The current profile as Google last returned it, or null if never synced.
+ *
+ * Editors MUST seed from this rather than from the denormalized `Location` row.
+ * The snapshot is the source of truth, and it is what the policy engine
+ * compares a proposal against when deciding risk — an editor seeded from
+ * anything else could show a schedule that differs from the one the guardrails
+ * are reasoning about, so its "you are closing Tuesday" warning would be wrong
+ * in exactly the case it matters.
+ */
+export async function getCurrentProfile(
+  ctx: TenantContext,
+  locationId: string,
+): Promise<GbpLocationResource | null> {
+  requireCapability(ctx, 'location:view');
+
+  const snapshot = await ctx.db.locationSnapshot.findFirst({
+    where: { locationId },
+    orderBy: { capturedAt: 'desc' },
+    select: { rawPayload: true },
+  });
+
+  return (snapshot?.rawPayload as unknown as GbpLocationResource) ?? null;
+}
+
 /** Most recent snapshot for a location. Audits run against this. */
 export async function getLatestSnapshot(ctx: TenantContext, locationId: string) {
   const snapshot = await ctx.db.locationSnapshot.findFirst({

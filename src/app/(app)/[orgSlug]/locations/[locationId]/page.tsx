@@ -3,7 +3,7 @@ import { redirect, notFound } from "next/navigation";
 import Link from "next/link";
 import { ActionType, FindingStatus } from "@/generated/prisma/enums";
 import { resolveTenantContext } from "@/server/auth/session";
-import { getLocation, syncLocation } from "@/server/services/locations";
+import { getLocation, syncLocation, getCurrentProfile } from "@/server/services/locations";
 import { runLocationAudit, getLatestAuditRun, listAuditHistory } from "@/server/services/audits";
 import { proposeChange, getChangeLog } from "@/server/services/changes";
 import { can } from "@/server/auth/rbac";
@@ -11,6 +11,12 @@ import { isAppError } from "@/server/errors";
 import { ProposeFix, isProposable } from "@/components/features/propose-fix";
 import { CategoryEditor, type CategoryOption } from "@/components/features/category-editor";
 import { searchCategories, type CategorySearchResult } from "@/server/services/categories";
+import { HoursEditor } from "@/components/features/hours-editor";
+import {
+  scheduleFromGooglePeriods,
+  googlePeriodsFromSchedule,
+  type Schedule,
+} from "@/lib/hours";
 import type { HealthScore as HealthScoreShape } from "@/server/audit/scoring";
 import { HealthScore } from "@/components/features/health-score";
 import { FindingsList } from "@/components/features/findings-list";
@@ -170,6 +176,57 @@ async function proposeCategoriesAction(formData: FormData) {
   }
 }
 
+async function proposeHoursAction(formData: FormData) {
+  "use server";
+  const orgSlug = String(formData.get("orgSlug"));
+  const locationId = String(formData.get("locationId"));
+  const path = `/${orgSlug}/locations/${locationId}`;
+
+  let schedule: Schedule;
+  try {
+    schedule = JSON.parse(String(formData.get("schedule") ?? "{}")) as Schedule;
+  } catch {
+    redirect(`${path}?error=${encodeURIComponent("Could not read the submitted schedule.")}`);
+  }
+
+  const payload = {
+    // A day with no periods produces nothing here, which is how Google expresses
+    // closed. The editor makes that explicit rather than letting it be an
+    // accident of an unfilled form.
+    periods: googlePeriodsFromSchedule(schedule),
+    sourceRef: {
+      kind: String(formData.get("sourceKind") ?? "USER_INPUT"),
+      detail: String(formData.get("sourceDetail") ?? "").trim(),
+    },
+  };
+
+  try {
+    const ctx = await resolveTenantContext(orgSlug);
+    const result = await proposeChange(ctx, {
+      locationId,
+      actionType: ActionType.UPDATE_REGULAR_HOURS,
+      payload,
+    });
+    revalidatePath(path);
+    redirect(
+      `${path}?proposed=${encodeURIComponent(
+        result.deduplicated
+          ? "An identical proposal was already queued."
+          : `Proposed (${result.policy.riskLevel} risk). Waiting for approval.`,
+      )}`,
+    );
+  } catch (error) {
+    if (isAppError(error)) {
+      redirect(
+        `${path}?error=${encodeURIComponent(
+          error.expose ? error.message : "Could not propose this change.",
+        )}`,
+      );
+    }
+    throw error;
+  }
+}
+
 async function syncLocationAction(formData: FormData) {
   "use server";
   const orgSlug = String(formData.get("orgSlug"));
@@ -205,10 +262,13 @@ export default async function LocationDetailPage({
     throw error;
   }
 
-  const [auditRun, history, changeLog] = await Promise.all([
+  const [auditRun, history, changeLog, currentProfile] = await Promise.all([
     getLatestAuditRun(ctx, locationId),
     listAuditHistory(ctx, locationId, 10),
     getChangeLog(ctx, locationId, 20),
+    // Editors seed from the snapshot, not the denormalized row — see
+    // getCurrentProfile for why that distinction matters.
+    getCurrentProfile(ctx, locationId),
   ]);
 
   const canRun = can(ctx, "audit:run");
@@ -368,16 +428,40 @@ export default async function LocationDetailPage({
               orgSlug={orgSlug}
               locationId={locationId}
               currentPrimary={
-                location.primaryCategoryId
+                currentProfile?.categories?.primaryCategory?.name
                   ? {
-                      id: location.primaryCategoryId,
-                      displayName: location.primaryCategoryName ?? location.primaryCategoryId,
+                      id: currentProfile.categories.primaryCategory.name,
+                      displayName:
+                        currentProfile.categories.primaryCategory.displayName ??
+                        currentProfile.categories.primaryCategory.name,
                     }
                   : null
               }
-              currentSecondary={toCategoryOptions(location.secondaryCategories)}
+              currentSecondary={toCategoryOptions(
+                currentProfile?.categories?.additionalCategories,
+              )}
               searchAction={searchCategoriesAction.bind(null, orgSlug)}
               submitAction={proposeCategoriesAction}
+            />
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {canDraft ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Opening hours</CardTitle>
+            <CardDescription>
+              Submitting replaces the published schedule in full — a day left closed here is
+              published as closed. The form is seeded from what Google currently shows.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <HoursEditor
+              orgSlug={orgSlug}
+              locationId={locationId}
+              currentSchedule={scheduleFromGooglePeriods(currentProfile?.regularHours?.periods)}
+              submitAction={proposeHoursAction}
             />
           </CardContent>
         </Card>

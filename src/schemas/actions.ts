@@ -111,10 +111,22 @@ const dayOfWeekSchema = z.enum([
   'SUNDAY',
 ]);
 
-const timeOfDaySchema = z.object({
-  hours: z.number().int().min(0).max(23),
-  minutes: z.number().int().min(0).max(59).default(0),
-});
+/**
+ * A time of day, matching Google's TimeOfDay.
+ *
+ * `hours` allows 24, not 23: Google represents "open until end of day" — and
+ * therefore a 24-hour business — as a close time of 24:00. Capping at 23 would
+ * make it impossible to describe a business that never closes. 24 is only valid
+ * on the hour, so 24:30 is rejected.
+ */
+const timeOfDaySchema = z
+  .object({
+    hours: z.number().int().min(0).max(24),
+    minutes: z.number().int().min(0).max(59).default(0),
+  })
+  .refine((time) => time.hours !== 24 || time.minutes === 0, {
+    message: '24:00 is the end of the day; minutes must be 0 when hours is 24',
+  });
 
 export const updateRegularHoursSchema = z.object({
   ...baseFields,
