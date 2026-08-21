@@ -67,6 +67,22 @@ export function assertLiveWritesAllowed(context: string): void {
  * likely to trigger a Google suspension or destroy ranking if set wrongly, and
  * because name manipulation is an explicit Google policy violation
  * (see ARCHITECTURE.md §7).
+ *
+ * PERMANENT ENTRIES — settled decisions, not current-state defaults:
+ *
+ *   UPDATE_CATEGORIES is permanently on this list. The primary category is the
+ *   strongest single ranking signal a profile has and a wrong one is the most
+ *   damaging non-fatal error available, so the blast radius does not justify
+ *   automating it however confident the proposal looks. This is not "off until
+ *   we trust it" — removing it is a decision to be argued explicitly, not made
+ *   in passing while enabling auto-apply for something else.
+ *
+ *   UPDATE_ADDRESS is permanently on this list for the same reason: a bad
+ *   address write frequently triggers Google re-verification, which can take a
+ *   profile offline entirely.
+ *
+ * Both are pinned by tests in tests/unit/features.test.ts so removal breaks
+ * the build rather than slipping through review.
  */
 export const ALWAYS_HUMAN_APPROVED_ACTIONS: ReadonlySet<ActionType> = new Set([
   ActionType.UPDATE_TITLE,

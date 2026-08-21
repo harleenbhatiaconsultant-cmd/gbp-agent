@@ -17,6 +17,8 @@ import {
   googlePeriodsFromSchedule,
   type Schedule,
 } from "@/lib/hours";
+import { AddressEditor } from "@/components/features/address-editor";
+import { addressFromGoogle, type EditableAddress } from "@/lib/address";
 import type { HealthScore as HealthScoreShape } from "@/server/audit/scoring";
 import { HealthScore } from "@/components/features/health-score";
 import { FindingsList } from "@/components/features/findings-list";
@@ -213,6 +215,62 @@ async function proposeHoursAction(formData: FormData) {
         result.deduplicated
           ? "An identical proposal was already queued."
           : `Proposed (${result.policy.riskLevel} risk). Waiting for approval.`,
+      )}`,
+    );
+  } catch (error) {
+    if (isAppError(error)) {
+      redirect(
+        `${path}?error=${encodeURIComponent(
+          error.expose ? error.message : "Could not propose this change.",
+        )}`,
+      );
+    }
+    throw error;
+  }
+}
+
+async function proposeAddressAction(formData: FormData) {
+  "use server";
+  const orgSlug = String(formData.get("orgSlug"));
+  const locationId = String(formData.get("locationId"));
+  const path = `/${orgSlug}/locations/${locationId}`;
+
+  let address: EditableAddress;
+  try {
+    address = JSON.parse(String(formData.get("address") ?? "{}")) as EditableAddress;
+  } catch {
+    redirect(`${path}?error=${encodeURIComponent("Could not read the submitted address.")}`);
+  }
+
+  const payload = {
+    regionCode: address.regionCode?.trim().toUpperCase() ?? "",
+    addressLines: (address.addressLines ?? []).map((line) => line.trim()).filter(Boolean),
+    // Optional fields are omitted rather than sent empty: an empty string is a
+    // value Google would store, whereas absent means "not applicable here",
+    // which is correct for countries that do not use them.
+    locality: address.locality?.trim() || undefined,
+    administrativeArea: address.administrativeArea?.trim() || undefined,
+    postalCode: address.postalCode?.trim() || undefined,
+    languageCode: address.languageCode?.trim() || undefined,
+    sourceRef: {
+      kind: String(formData.get("sourceKind") ?? "USER_INPUT"),
+      detail: String(formData.get("sourceDetail") ?? "").trim(),
+    },
+  };
+
+  try {
+    const ctx = await resolveTenantContext(orgSlug);
+    const result = await proposeChange(ctx, {
+      locationId,
+      actionType: ActionType.UPDATE_ADDRESS,
+      payload,
+    });
+    revalidatePath(path);
+    redirect(
+      `${path}?proposed=${encodeURIComponent(
+        result.deduplicated
+          ? "An identical proposal was already queued."
+          : "Proposed. Address changes always need a human approver.",
       )}`,
     );
   } catch (error) {
@@ -462,6 +520,29 @@ export default async function LocationDetailPage({
               locationId={locationId}
               currentSchedule={scheduleFromGooglePeriods(currentProfile?.regularHours?.periods)}
               submitAction={proposeHoursAction}
+            />
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {canDraft ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Address</CardTitle>
+            <CardDescription>
+              The highest-risk edit here. Changing a published address frequently triggers Google
+              re-verification, during which the profile can stop appearing at all.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <AddressEditor
+              orgSlug={orgSlug}
+              locationId={locationId}
+              currentAddress={addressFromGoogle(currentProfile?.storefrontAddress)}
+              isServiceAreaBusiness={Boolean(
+                currentProfile?.serviceArea?.places?.placeInfos?.length,
+              )}
+              submitAction={proposeAddressAction}
             />
           </CardContent>
         </Card>
