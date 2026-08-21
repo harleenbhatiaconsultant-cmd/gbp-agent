@@ -114,7 +114,15 @@ const envSchema = z.object({
   // Token encryption (required once Google connections exist) --------------
   // Optional at boot so Phase 0/1 can run without it; `requireTokenEncryptionKey()`
   // throws at the point of use if it is missing.
-  TOKEN_ENCRYPTION_KEY: zBase64Key32.optional(),
+  // `.optional()` alone permits undefined but NOT the empty string, and an
+  // unset variable in a .env file is an empty string, not undefined. Without
+  // this preprocessing, copying .env.example to .env — the documented first
+  // step — produces a config that refuses to boot. Found by cloning the
+  // published repo and following the README.
+  TOKEN_ENCRYPTION_KEY: z.preprocess(
+    (v) => (v === '' ? undefined : v),
+    zBase64Key32.optional(),
+  ),
   TOKEN_ENCRYPTION_KEY_VERSION: zInt(1),
 
   // Pub/Sub (Phase 7) ------------------------------------------------------
@@ -272,8 +280,20 @@ export function assertEnvironmentInvariants(parsed: ServerEnv): void {
   }
 }
 
+/**
+ * Validates an arbitrary environment source against the schema.
+ *
+ * Exported so the contents of `.env.example` can be checked directly. A
+ * template that does not actually parse is worse than no template: it is the
+ * documented first step of setup, and it failing produces a boot error on a
+ * fresh clone before the developer has written a line.
+ */
+export function validateEnv(source: Record<string, unknown>) {
+  return envSchema.safeParse(source);
+}
+
 function parseEnv(): ServerEnv {
-  const result = envSchema.safeParse(process.env);
+  const result = validateEnv(process.env);
 
   if (!result.success) {
     const issues = result.error.issues
