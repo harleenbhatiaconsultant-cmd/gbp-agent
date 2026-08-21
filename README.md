@@ -6,19 +6,18 @@ Google Business Profile management and local SEO optimization for businesses and
 - **[DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)** — phases, MVP scope, open decisions
 - **[docs/DEPLOYMENT_RAILWAY.md](docs/DEPLOYMENT_RAILWAY.md)** — deployment topology (not deployed yet)
 
-**Current state: Phases 0–6 complete.** Tenancy and auth, the Google connection, location
-import with immutable snapshots, the audit engine, the background job layer, and the full
-change pipeline — propose, policy, approve, dry run, execute, verify — are all built. Editors
-exist for categories, hours and address.
-
 **The write path is built but gated shut.** Under the default configuration nothing can reach
 a live business profile even with valid credentials loaded: every write is sent to Google with
 `validateOnly=true`. That is asserted against the provider's actual call log, not inferred
 from a flag. See *Safety defaults* below.
 
-Two things are built but unverified against the real thing, both waiting on external access:
-the BullMQ round-trip (needs `REDIS_URL`) and the Google connect flow (needs approved
-Business Profile API access).
+**Two integrations are built but unverified against the real thing**, both waiting on external
+access: the BullMQ round-trip (needs `REDIS_URL`) and anything that talks to a real profile
+(needs the Business Profile API access request approved).
+
+Phase-by-phase status lives in exactly one place — [Status by phase](#status-by-phase). It is
+deliberately not restated here, because a summary that enumerates phases is a second copy that
+has to be kept in agreement with the first, and it will not be.
 
 Try it without Google credentials:
 
@@ -175,6 +174,11 @@ Re-observing the same issue marks the older row `SUPERSEDED` — collapsing the 
 a fix on every audit run and make the client-facing history worthless.
 
 ## Status by phase
+
+This table is the single source of truth for what is built. Update it in the same commit as
+the work it describes — a status table corrected later, when someone happens to notice, has
+already misled whoever read it in between. `tests/unit/readme-consistency.test.ts` enforces the
+structure and stops the phase list being duplicated into the summary again.
 
 | Phase | Scope | State |
 |---|---|---|
