@@ -44,11 +44,15 @@ in the callback route; `worker` needs them to refresh tokens for background sync
 1. **Migrations.** Add `npm run db:migrate:deploy` as a pre-deploy command on the
    `web` service only. Running it from three services concurrently would race on
    the migration lock.
-2. **`tsx` must be installable in production.** `worker` and `scheduler` start via
-   `tsx`, which is currently a devDependency. Railway prunes devDependencies for
-   production installs, so before deploying either: move `tsx` to `dependencies`,
-   or add a `tsc` build step that emits the worker to `dist/` and start from
-   plain Node. Decide this in Phase 4, when the worker actually does something.
+2. **`tsx` is a production dependency — deliberately.** `worker` and `scheduler`
+   start via `tsx`, and Railway prunes devDependencies for production installs, so
+   it would not be there to run them.
+
+   The alternative — a `tsc` build emitting to `dist/` — was rejected: the worker
+   imports through `@/` path aliases, and plain `tsc` emits those unresolved, so
+   Node cannot load them without adding `tsc-alias` or a bundler. `tsx` resolves
+   tsconfig paths natively. The cost is carrying esbuild into the runtime image;
+   the benefit is one fewer build step that can silently emit broken imports.
 3. **`GBP_WRITE_MODE`.** Leave it at `validate_only` on the first production
    deploy. Flip it to `live` only after the GBP API access request is approved
    and a real change has been rehearsed end to end. The env loader refuses
